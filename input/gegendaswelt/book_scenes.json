@@ -1,0 +1,113 @@
+{
+  "book_info": {
+    "title": "Die Weltgeschichte – Kapitel I: Eine Erziehungsanstalt im Jahre 3877",
+    "author": "Kurd Laßwitz",
+    "style": "retro-futurism, brass and glass machinery, early sci-fi aesthetic, blue light, steampunk realism",
+    "total_chars": 11168,
+    "total_scenes": 17
+  },
+  "scenes": [
+    {
+      "start_pos": 0,
+      "end_pos": 587,
+      "text": "I. Eine Erziehungsanstalt im Jahre 3877\n»Von der Rindenschicht im Gehirn Ihres Sohnes steht Ihnen gesetzlich die Bestimmung über ein Drittel zu; in Bezug auf dieses können Sie eine Gewöhnung der Zellen zu speziellen Vorgängen der Spannung, Leitung und Bewegung nach Ihren Wünschen vornehmen lassen. Ein Drittel bleibt, wie Sie wissen, zur späteren eigenen Verfügung Ihres Sohnes behufs Ausbildung seiner Gehirnfunktionen reserviert, während das letzte Drittel nach § 111 des Unterrichtsgesetzes vom 22. Januar 3854 in einer öffentlichen Anstalt für allgemeine Bildung zu präparieren ist.",
+      "image_prompt": "Blond girl Selen Propion in blue uniform with learning helmet sleeping under electrodes inside a glass dome in a blue-lit school laboratory"
+    },
+    {
+      "start_pos": 588,
+      "end_pos": 1537,
+      "text": "Wollen Sie mir nun gütigst angeben, für welche Disziplinen Sie die Präparierung des Großhirns wünschen?«\n\nSo sprach der Direktor des Pädagogiums und Professor der Geschichte, Herr Strudel-Prudel, zu einem Herrn, welcher seinen hoffnungsvollen Sprössling im Alter von drei Jahren eben als Zögling des Pädagogiums angemeldet hatte.\n\n»Ich würde dann bitten«, antwortete der Vater, »ihn für Physik und Chemie zu präparieren und zugleich etwas Talent für Musik hervorzurufen.«\n\nDer Direktor notierte das Gewünschte, indem er sagte: »Ihr Sohn... Wie heißt er?«\n\n»Selen.«\n\n»Selen Propion – schön. Ihr Sohn wird demnach zur Klasse C, Abteilung I der naturwissenschaftlichen Sektion unserer Vorbereitungsanstalt gehören. Behandlung und Unterricht daselbst sind unentgeltlich; für die Erzeugung des musikalischen Talents haben Sie jedoch behufs Verfeinerung der Mechanik des Ohres ein monatliches Honorar von hundert Goldgramm Goldgramm = 2,79 Mark zu zahlen.",
+      "image_prompt": "Blonde three-year-old child with blue uniform and learning helmet, standing next to older man with grey hair, blue eyes, grey coat, and glasses of wine, in a metallic, bright room with glass walls and polished furniture."
+    },
+    {
+      "start_pos": 1538,
+      "end_pos": 2377,
+      "text": "Der Unterricht beginnt morgen. So, das wäre das Geschäftliche. Und nun, Herr Propion, wenn es Ihnen Vergnügen macht, zeige ich Ihnen einmal unsere Anstalt.«\n\nTypus Propion nahm gern den Vorschlag an. Er war Besitzer einer chemischen Fabrik für Lebensmittel und von früher her mit dem Direktor Strudel-Prudel bekannt, obgleich die Männer im Drange der Geschäfte einander selten sahen. Da Propion von der inneren Organisation einer großen Erziehungsanstalt sehr wenig wusste, war es ihm umso angenehmer, von einem Fachmanne von solchem Rufe, wie Strudel, darüber belehrt zu werden und namentlich die mechanischen Einrichtungen kennen zu lernen.\n\nDie Anstalt zerfiel nach Maßgabe des neuen Unterrichtsgesetzes in zwei Teile, eine Vorbereitungsanstalt und eine Lehranstalt oder, wie man sie auch nannte, in die »Hirnschule« und die »Akademie«.",
+      "image_prompt": "Typus Propion, strong man with dark hair and a mustache, stands in the sterile, metal-accented director's office of the Pädagogium, gazing at glass walls showcasing projections of the Akademie - a half-round hall adorned with hanging nets, luminous projections, and a glowing ceiling."
+    },
+    {
+      "start_pos": 2378,
+      "end_pos": 2741,
+      "text": "In der »Hirnschule« wurde überhaupt kein Lehrstoff benützt, diese Abteilung diente nur dazu, das Gehirn der Kinder zur späteren Aufnahme desselben geeignet zu machen. Dies geschah auf rein mechanischem, das heißt physiologischem Wege.\n\nWir müssen hier um Entschuldigung bitten, wenn der Ausdruck mitunter den realen Vorgang nicht genau trifft. Die Sprache des 19.",
+      "image_prompt": "Blonde girl Selen Propion sleeping on a bed of electrodes under blue light in a glass chamber, other children wearing bright uniforms also sleeping with electrodes in a nearby glass room, within the brain school laboratories."
+    },
+    {
+      "start_pos": 2742,
+      "end_pos": 3265,
+      "text": "Jahrhunderts, in der wir doch reden müssen, ist eben nicht immer fähig, den neugewonnenen Einsichten der Zukunft zu folgen. So gäbe es ein schiefes Bild, wenn man sich vorstellen wollte, das Gehirn nähme etwa den Lehrstoff auf wie das Glas den Wein. Es handelt sich um die Ausbildung einer Art von Schematismus, der gewissen Bewusstseinvorgängen entspricht; auch der Schwimmer, der Tänzer machen Vorübungen, denen sich dann die entsprechenden Muskelbewegungen leichter anschließen. Vielleicht wird das aus folgendem klarer.",
+      "image_prompt": "Blonde Selen Propion, three years old, blue uniform, learning helmet, sleeping, inside a glass chamber with artificial sunlight and symmetric plants, within the Technisches Foyer des Pädagogiums."
+    },
+    {
+      "start_pos": 3267,
+      "end_pos": 3711,
+      "text": "Fast schon seit zweitausend Jahren war die Psychophysik, die Lehre von den Gesetzen des Bewusstseins, ein selbstständiger Zweig der Psychologie geworden, und das Studium der Gehirnfunktionen hatte zu einer vollständigen Theorie derselben geführt. Die Folgen, welche diese Entdeckungen für das Gebiet der Künste und Wissenschaften hatten, werden später zur Erörterung kommen; hier soll uns zunächst die Anwendung auf die Pädagogik interessieren.",
+      "image_prompt": "Direktor Strudel-Prudel in a sterile, metallic director's office of the Pedagogium, surrounded by sleeping children in white uniforms with electrodes on their heads under a light dome."
+    },
+    {
+      "start_pos": 3713,
+      "end_pos": 5086,
+      "text": "Man kannte jetzt bis ins Kleinste hinein die Bewegungs- und Spannungsvorgänge in den Nerven und den Zellen der grauen Gehirnsubstanz, welche die Vorgänge des Bewusstseins, die Reihe der Vorstellungen und die logische Schlussbildung begleiten; man wusste, welche Zellen bei der Leitung bestimmter Wahrnehmungen und der Bildung bestimmter Gedankenfolgen tätig sind und in welcher Weise sie tätig sind; man konnte daher umgekehrt durch künstliche Reizung, namentlich durch den galvanischen Strom, auch die einzelnen Partien und Provinzen des Gehirns zu Bewegungen veranlassen, welche der Bildung bestimmter Vorstellungen entsprechen, und schließlich – worauf es ankam – sie so gewöhnen, dass gewisse Arten des Denkens mit besonderer Leichtigkeit vollzogen werden konnten. Denn wenn es auch ohne Vorstellungsinhalt keine allgemeinen Formen des reinen Denkens gibt (es sei denn in unserer Abstraktion), so gibt es doch einen Schematismus und mit ihm einen dauernden Apparat und Mechanismus des Denkens, welcher in dem Wechsel des Vorstellungsinhalts in seinem Wesen beharrt; daher lässt dieser Denkapparat eine Veränderung und Ausbildung in dem einen oder anderen Sinne zu und macht so gewissermaßen den formalen Charakter des Denkens aus. Diesen Mechanismus des Denkens zu bilden war die Aufgabe, welche die Vorbereitungsanstalt oder »Hirnschule« auf physikalischem Wege löste.",
+      "image_prompt": "White-coated laboratory assistants working around sleeping children with electrodes under a blue light in a glass chamber within the Hirnschule."
+    },
+    {
+      "start_pos": 5088,
+      "end_pos": 6266,
+      "text": "Strudel und Propion traten in die Säle der Hirnschule. Laboratorien wäre ein richtiger Ausdruck. Die ganze Behandlung der Kinder bestand darin, dass dieselben anfänglich zwei, später drei Stunden täglich in eigentümlich konstruierten Apparaten der Einwirkung galvanischer Ströme, welche nach den ausbildungsbedürftigen Gehirnpartien führten, ausgesetzt wurden und dass auch im Übrigen mit den feinen und ausgedehnten Mitteln, welche die Chemie des Gehirns im vierten Jahrtausend entdeckt hatte, das Wachstum und die Bewegung der Zellen in der Rindenschicht überwacht und gehütet wurde. War man in früheren Jahrtausenden zu der Einsicht gekommen, dass die Muskeln und Sehnen des Körpers besonderer Übung und Pflege bedurften, wenn im kräftigen Menschen ein heiteres Gemüt sich wohl befinden sollte, so sah man jetzt ein, um wie viel wichtiger noch es sei, den Sitz der Vernunft in seiner Ausbildung sorgsam zu hüten und zu pflegen, um später dadurch eine kräftige Gedankenentwicklung zu erzielen. Dadurch wurden denn überraschende Resultate erreicht.\n\n»Sie sehen hier«, sagte der Direktor zu Propion, »in welcher Weise wir das Turnen des Gehirns betreiben. Da sind unsere Geräte.",
+      "image_prompt": "Propion and Strudel enter the laboratories of the Brain School. The room is filled with children lying on peculiar apparatuses undergoing the influence of galvanic currents directed at specific brain regions. Various fine chemical methods monitor and protect the growth and movement of cells in th..."
+    },
+    {
+      "start_pos": 6267,
+      "end_pos": 7702,
+      "text": "Im Schlafe, ohne Anstrengung des Kindes, die früher so viel Siechtum verursachte, geben wir hier die Grundlagen der formalen Bildung und schaffen Anlagen, welche der Menschheit die reichsten Früchte tragen. Welche Mühe kostete es früher, einen Menschen nur so weit zu bringen, dass er im Stande war, selbstständig in eine Wissenschaft einzudringen. Vom sechsten bis zum zwanzigsten Jahre musste man sich bemühen, mit Latein und Griechisch, Geschichte und Mathematik das Gehirn so weit in Übung zu bringen, dass es fähig wurde, eine logische Gedankenentwicklung zu verfolgen und einigermaßen den Gang der Ereignisse zu verstehen, und dabei konnte man dem Dummen doch nicht helfen. Wie einfach ist die Sache jetzt! Hier ein Zug am Großhirnlappen, ein dauernder Strom durch den Fuß des Hirnschenkels, eine kräftigende Behandlung des Linsenkerns – und nach zwei Jahren ist der fünfjährige Mensch bereit, unbehindert seiner Körperentwicklung in die großen Probleme der Wissenschaft und des Daseins eingeführt zu werden. Hier haben Sie Abteilung eins für exakte Wissenschaften. Hier werden in der ersten Sektion Mathematiker, Physiker und Chemiker propädeutisch erzeugt, in der zweiten Biologen, also im Besonderen Ethnologen, Zoologen, Botaniker, Ökonomen und so weiter. In der zweiten Abteilung ist die Werkstätte für Logiker, Metaphysiker, Historiker und Archäologen; die Dritte ist für Sprachforscher, Redner und Schriftsteller bestimmt.",
+      "image_prompt": "White-coated laboratory assistant with a metallic sheen, standing near sleeping children wearing light blue electrodes under their helmets inside a glass-walled room illuminated by soft blue light."
+    },
+    {
+      "start_pos": 7702,
+      "end_pos": 7801,
+      "text": " Die Vierte bildet die Organe für das praktische Lebensgeschick, Umsicht, Tatkraft, Geschäftsgeist.",
+      "image_prompt": "Blonde Selen Propion mit hellem Lernhelm und Elektroden im gläsernen Laboratorium der Hirnschule unter einer blauen Lichtkuppel."
+    },
+    {
+      "start_pos": 7802,
+      "end_pos": 8890,
+      "text": "Dass die Hirnschule der Kunst und der Sitte mit ihrer Propädeutik für das ästhetische und ethische Ideal an dem wissenschaftlichen Institut getrennt ist, werden Sie passend finden. Jeder Schüler aber muss die untersten Klassen sämtlicher Abteilungen behufs seiner allgemeinen Bildung durchlaufen; dies geschieht im ersten Jahre, im zweiten findet dann die Ausbildung zu seinem speziellen Fache in den oberen Klassen statt. Ist auch diese vollendet, so treten wir in die Akademie ein, in welcher die Vorlesungen der Lehrer jetzt leicht und willig erfasst, verstanden und behalten werden. Mit dem neunten Jahre ist die Erziehung vollendet – welche Resultate der modernen Pädagogik! Der Geist eines Neunjährigen entspricht heutzutage an Reife und Erfahrung dem eines bejahrten Mannes aus einer früheren Periode. Es gab eine Zeit, wo man sich schaudernd fragte: Bei der ungeheuren Zunahme an Material des Wissens, bei der Häufung des geistigen Inhalts der Zeit – wie soll es dem jungen Menschen, wie dem Einzelnen überhaupt möglich sein, auch nur einen ganz allgemeinen Überblick zu bewahren?",
+      "image_prompt": "Blonde Selen Propion, three years old, in light uniform with learning helmet, sleeping on a bed of electric cables inside a blue-lit glass chamber - Hirnschule, laboratories."
+    },
+    {
+      "start_pos": 8891,
+      "end_pos": 9010,
+      "text": "Und man schuf Methode auf Methode und Lehrbuch auf Lehrbuch, und jeder fragte zuletzt verzweifelt: Wie soll das werden?",
+      "image_prompt": "Direktor Strudel-Prudel with grey hair and blue eyes, standing in the sterile, metallic Director's office of the Pädagogium."
+    },
+    {
+      "start_pos": 9011,
+      "end_pos": 9566,
+      "text": "Aber wie einst in der Astronomie die Erscheinungen den Anhängern des Ptolemäus über den Kopf wuchsen, die vergebens Epizykel auf Epizykel und Rädchen auf Rädchen in der Himmelsmaschine häuften, ohne zu Stande zu kommen mit der Erklärung, bis Kopernikus mit seinem Machtspruch hervortrat und die Sache umkehrte, die Sonne stillstehen hieß und die Planeten drehte – so erschien auch der Pädagogik ihr Kopernikus in der Stunde der Gefahr! Im Jahre 3781 schrieb Hemisphärion: ›Die Theorie der Gehirnfunktionen ist seit hundert Jahren entwickelt – wohlan denn!",
+      "image_prompt": "White-haired Professor Hemisphärion with gold symbols in black coat, standing in front of white walls with data projections and geometric patterns in the department for logic and history."
+    },
+    {
+      "start_pos": 9567,
+      "end_pos": 9678,
+      "text": "Benützen wir sie! Fort mit den Lehrbüchern, mit den Methoden des Unterrichts, mit den mnemotechnischen Kniffen!",
+      "image_prompt": "Direktor Strudel-Prudel with determined eyes, Professor Hemisphärion with white hair, both standing amidst holographic displays in the technical foyer of the Pädagogium."
+    },
+    {
+      "start_pos": 9679,
+      "end_pos": 10153,
+      "text": "Wenn sich der Lehrstoff dem Gehirn nicht bequemen will, gut, so bequeme sich das Gehirn dem Lehrstoffe! Lasst uns Laboratorien erbauen, Physiologen mögen unsere Lehrer werden – präpariert die graue Substanz des Kindergehirns, und ihr braucht nicht die Schriftsteller für sie zu präparieren!‹ Es sind goldene Worte! Bekämpft, verlacht, haben sie doch den Sieg errungen, und wir danken Hemisphärion, dem wahren Erfinder des berühmten ›Nürnberger Trichters‹, aus vollem Herzen.",
+      "image_prompt": "Golden-haired child Selen Propion in blue uniform, learning helmet, sleeping in a glass chamber with blue light, surrounded by precise white-coated laboratory assistants of the Brain School."
+    },
+    {
+      "start_pos": 10154,
+      "end_pos": 10418,
+      "text": "Doch verzeihen Sie mir, Herr Propion«, unterbrach sich der Direktor, »ich habe Ihre Geduld in Anspruch genommen und dabei selbst meine Zeit fast versäumt. Ich muss zu meinem Geschichtsvortrage nach Prima – ich gebe heute eine Übersicht über das letzte Jahrtausend.",
+      "image_prompt": "Direktor Strudel-Prudel, gray hair, blue eyes, gray coat, in Professor Hemisphärion's white-walled room with data projections and geometric patterns."
+    },
+    {
+      "start_pos": 10419,
+      "end_pos": 10701,
+      "text": "Schon sind wir vor der Türe – ich habe die Ehre.«\n\nMan berührte sich mit den Spitzen der kleinen Finger, wie es die Sitte der Zeit verlangte; Propion sprach seinen Dank aus und steckte sich ein »Bildtäfelchen« ins Auge, während er auch Strudel ein solches anbot, der ebenso verfuhr.",
+      "image_prompt": "Strudel-Prudel, grey haired man with blue eyes, offering a glass of wine, shaking hands with Typus Propion, muscular man with dark hair and beard, wearing dark clothing and carrying picture badges."
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "book_info": {
+    "title": "Die Weltgeschichte – Kapitel I: Eine Erziehungsanstalt im Jahre 3877",
+    "author": "Kurd Laßwitz",
+    "style": "retro-futurism, brass and glass machinery, early sci-fi aesthetic, blue light, steampunk realism"
+  },
+  "locations": [
+    {
+      "name": "Pädagogium – Direktoratszimmer",
+      "description": "metallisch, hell, Glaswände, Messingmöbel, wissenschaftlich, steril"
+    },
+    {
+      "name": "Hirnschule – Laboratorien",
+      "description": "gläserner Saal, Kinder in Liegen, Elektroden, blaues Licht"
+    },
+    {
+      "name": "Akademie – Große Lehrhalle",
+      "description": "Halbrund, Hängematten, Lichtprojektionen, leuchtende Decke"
+    },
+    {
+      "name": "Vorbereitungsabteilung für Ästhetik und Sitte",
+      "description": "Musikraum, Glaswände, Farbenwellen, Resonanz, sanftes Licht"
+    },
+    {
+      "name": "Technisches Foyer des Pädagogiums",
+      "description": "Metallhalle, Glasboden, Lichtlinien, holografische Anzeigen"
+    },
+    {
+      "name": "Abteilung für Logik und Geschichte",
+      "description": "weiße Wände, Datenprojektionen, geometrisch, ruhig, rein"
+    },
+    {
+      "name": "Garten der Anstalt",
+      "description": "Glaskuppel, künstliche Sonne, symmetrische Pflanzen, Drohnen"
+    }
+  ],
+  "characters": [
+    {
+      "name": "Direktor Strudel-Prudel",
+      "description": "älterer Mann, graues Haar, blauer Blick, grauer Kittel, Glaswein"
+    },
+    {
+      "name": "Typus Propion",
+      "description": "kräftig, dunkles Haar, Schnurrbart, dunkle Kleidung, Bildtäfelchen"
+    },
+    {
+      "name": "Selen Propion",
+      "description": "blond, drei Jahre alt, blaue Uniform, Lernhelm, ruhig"
+    },
+    {
+      "name": "Professor Hemisphärion",
+      "description": "weißes Haar, schwarzer Kittel, Goldsymbole, weiser Blick"
+    },
+    {
+      "name": "Laborassistenten der Hirnschule",
+      "description": "weiße Anzüge, still, präzise, metallischer Glanz, neutral"
+    },
+    {
+      "name": "Kinder der Hirnschule",
+      "description": "helle Uniformen, schlafend, Elektroden, Lichtkuppel, friedlich"
+    }
+  ]
+}
