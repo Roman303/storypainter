@@ -29,8 +29,8 @@ class FluxImageGenerator:
 
         # Format (Aspect Ratio)
         if output_format == "16:9":
-            self.width = 1920
-            self.height = 1080
+            self.width = 1600
+            self.height = 900
         else:
             self.width = 1024
             self.height = 1024
