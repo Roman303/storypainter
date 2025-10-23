@@ -21,15 +21,20 @@ class AudiobookRenderer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def find_scene_audio_files(self):
-        """Findet alle Szenen-Audio-Dateien"""
+        """Findet alle Szenen-Audio-Dateien und sortiert numerisch nach scene_id"""
         audio_files = sorted(self.scenes_dir.glob("scene_*.wav"))
         scenes = []
         for audio_file in audio_files:
             try:
-                scene_id = int(audio_file.stem.split('_')[1])
+                # erlaubt z.B. scene_0001.wav oder scene_1.wav
+                scene_id_str = audio_file.stem.split('_')[1]
+                scene_id = int(scene_id_str)
             except Exception:
                 continue
             scenes.append({"scene_id": scene_id, "audio_file": audio_file})
+
+        # numerisch nach scene_id sortieren (wichtig: 2 < 10)
+        scenes.sort(key=lambda s: s["scene_id"])
         return scenes
 
     def create_complete_audiobook(
@@ -53,31 +58,36 @@ class AudiobookRenderer:
         print("=" * 60)
         print("🎧 AUDIOBOOK-RENDERER")
         print("=" * 60)
-        print(f"\n📁 Szenen-Audio: {self.scenes_dir}")
-        print(f"📁 Output:       {self.output_dir}")
-        print(f"⏸️  Pause zw. Szenen: {pause_between_scenes:.3f}s")
-        print(f"🔕  Head-Silence:     {head_silence:.3f}s")
-        print(f"🔕  Tail-Silence:     {tail_silence:.3f}s\n")
 
         scenes = self.find_scene_audio_files()
         if not scenes:
             print("❌ Keine Szenen-Audio-Dateien gefunden!")
             return None
 
-        print(f"✅ {len(scenes)} Szenen gefunden\n")
+        print(f"\n📁 Szenen-Audio: {self.scenes_dir}")
+        print(f"📁 Output:       {self.output_dir}")
+        print(f"✅ {len(scenes)} Szenen gefunden")
+        print(f"⏸️  Pause zw. Szenen: {pause_between_scenes:.3f}s")
+        print(f"🔕  Head-Silence:     {head_silence:.3f}s")
+        print(f"🔕  Tail-Silence:     {tail_silence:.3f}s\n")
 
-        combined_audio = AudioSegment.silent(duration=int(head_silence * 1000))
-        pause = AudioSegment.silent(duration=int(pause_between_scenes * 1000))
+        # --- Alle Zeiten intern in Millisekunden rechnen (Integer) ---
+        head_ms = int(round(head_silence * 1000))
+        tail_ms = int(round(tail_silence * 1000))
+        pause_ms = int(round(pause_between_scenes * 1000))
+
+        combined_audio = AudioSegment.silent(duration=head_ms)
 
         metadata = {
             "total_scenes": len(scenes),
             "pause_duration": pause_between_scenes,
             "head_silence": head_silence,
             "tail_silence": tail_silence,
+            "timestamps_base": "absolute_with_head_silence",  # Klarheit im Consumer
             "scenes": [],
         }
 
-        current_time = head_silence  # Sekunden – Start nach Head-Silence
+        current_ms = head_ms  # Start nach Head-Silence
 
         # Szenen zusammenfügen
         for i, scene in enumerate(scenes, 1):
@@ -86,32 +96,44 @@ class AudiobookRenderer:
             try:
                 audio = AudioSegment.from_wav(audio_file)
             except Exception as e:
-                print(f"   ⚠️ Szene {scene_id:04d} konnte nicht geladen werden: {e}")
+                print(f"   ⚠️  Szene {scene_id:04d} konnte nicht geladen werden: {e}")
                 continue
 
-            duration = len(audio) / 1000.0
-            print(f"   [{i:03d}] Szene {scene_id:04d}: {duration:.3f}s @ {current_time:.3f}s")
-
+            duration_ms = len(audio)
+            duration_s = round(duration_ms / 1000.0, 3)
+            start_s = round(current_ms / 1000.0, 3)
+            end_s = round((current_ms + duration_ms) / 1000.0, 3)
+            
+            # Endzeit + Pause (nur wenn nicht letzte Szene)
+            if i < len(scenes):
+                end_with_pause_s = round((current_ms + duration_ms + pause_ms) / 1000.0, 3)
+            else:
+                end_with_pause_s = end_s
+            
+            print(f"   [{i:03d}] Szene {scene_id:04d}: {duration_s:.3f}s @ {start_s:.3f}s → {end_s:.3f}s (inkl. Pause bis {end_with_pause_s:.3f}s)")
+            
             # zu kombiniertes Audio
             combined_audio += audio
-
-            # Metadaten sichern (Start/Ende inkl. Head-Silence-Offset)
+            
+            # Metadaten sichern (Endzeit enthält Pause, damit Video-Schnitt synchron bleibt)
             metadata["scenes"].append({
                 "scene_id": scene_id,
-                "start_time": current_time,
-                "end_time": current_time + duration,
-                "duration": duration,
+                "start_time": start_s,
+                "end_time": end_with_pause_s,
+                "duration": round((end_with_pause_s - start_s), 3),
             })
-            current_time += duration
 
-            # Pause hinterher (außer letzte Szene)
-            if i < len(scenes):
-                combined_audio += pause
-                current_time += pause_between_scenes
+        # Audio + Pause addieren
+        current_ms += duration_ms
+        if i < len(scenes) and pause_ms > 0:
+            combined_audio += AudioSegment.silent(duration=pause_ms)
+            current_ms += pause_ms
 
         # Tail-Silence ans Ende
-        combined_audio += AudioSegment.silent(duration=int(tail_silence * 1000))
-        total_duration = len(combined_audio) / 1000.0
+        if tail_ms > 0:
+            combined_audio += AudioSegment.silent(duration=tail_ms)
+        total_ms = len(combined_audio)
+        total_duration = round(total_ms / 1000.0, 3)
 
         # Dateien schreiben
         wav_output = self.output_dir / "complete_audiobook.wav"
@@ -168,7 +190,7 @@ def main():
                         help="Verzeichnis mit Szenen-Audio (scene_*.wav)")
     parser.add_argument("--output", default=None,
                         help="Output-Verzeichnis für das Hörbuch")
-    parser.add_argument("--pause", type=float, default=2.0,
+    parser.add_argument("--pause", type=float, default=2.6,
                         help="Pause zwischen Szenen in Sekunden (Standard: 2.0)")
     parser.add_argument("--head-silence", type=float, default=10.0,
                         help="Stille am Anfang in Sekunden (Standard: 10.0)")
@@ -189,13 +211,15 @@ def main():
         "mp3_bitrate": args.mp3_bitrate,
     }
 
-
-    renderer = AudiobookRenderer(scenes_dir=args.scenes, output_dir=args.output)
+    renderer = AudiobookRenderer(
+        scenes_dir=CONFIG["scenes"],
+        output_dir=CONFIG["output"]
+    )
     result = renderer.create_complete_audiobook(
-        pause_between_scenes=args.pause,
-        head_silence=args.head_silence,
-        tail_silence=args.tail_silence,
-        mp3_bitrate=args.mp3_bitrate
+        pause_between_scenes=CONFIG["pause"],
+        head_silence=CONFIG["head_silence"],
+        tail_silence=CONFIG["tail_silence"],
+        mp3_bitrate=CONFIG["mp3_bitrate"]
     )
 
     if result:

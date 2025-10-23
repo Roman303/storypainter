@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 """
-Story-Renderer - Erstellt Video aus Hörbuch + Bildern
-- Nutzt komplettes Hörbuch-Audio
-- Synchronisiert Bilder mit Szenen-Timestamps (frame-konsistent)
-- Optionales Intro- und Outro-Video (separat definierbar mit Dauer)
-- Optionales Overlay (Video oder Bild), das in einer Endlosschleife läuft
-- Sanfte Fades zwischen Szenen (konfigurierbar)
+Story-Renderer - Erstellt Video aus Hörbuch + Bildern (GAP/XFADE version)
+- Nutzt komplettes Hörbuch-Audio (WAV wird NICHT geschnitten)
+- Szenen-Video wird so gebaut, dass es exakt die Audiolänge abdeckt
+- Einheitlicher GAP zwischen den Szenen wird aus JSON berechnet
+- Jeder Scene-Chunk wird um GAP am Anfang und am Ende verlängert
+- Beim Mergen werden die Chunks mit 2*GAP überblendet (xfade),
+  so dass die effektiven Szenen-Start/Endpunkte (ohne Verlängerung)
+  nahtlos zusammenlaufen
+- Fades innerhalb der Szene sind so gelegt, dass das Einfaden
+  mit einer Verzögerung (transition_in_delay) startet und das
+  Ausfaden mit einer Verzögerung (transition_out_delay) am JSON-Ende beginnt.
+- Optionales Intro/Outro/Overlay bleiben erhalten
+
+Wichtige Annahmen fürs JSON der Szenen (mindestens eins der Felder muss passen):
+- Szenenobjekte enthalten entweder "start" und "end" (Sekunden), ODER
+- "start" und "duration", ODER
+- es existiert ein globaler "uniform_gap" in metadata (Sekunden)
+
+Wenn mehrere Gaps berechnet werden können, wird der Median verwendet und
+auf Konsistenz geprüft (Warnung, wenn die Streuung > 20 ms ist).
 """
 
 import subprocess
@@ -13,6 +27,7 @@ from pathlib import Path
 import json
 import os
 import argparse
+import statistics
 
 
 class StoryRenderer:
@@ -20,6 +35,8 @@ class StoryRenderer:
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.base_dir = self.output_dir.parent
 
         with open(audiobook_metadata, 'r', encoding="utf-8") as f:
             self.metadata = json.load(f)
@@ -34,6 +51,12 @@ class StoryRenderer:
         except Exception:
             return False
 
+    def _resolve(self, maybe_path):
+        if not maybe_path:
+            return None
+        p = Path(maybe_path)
+        return p if p.is_absolute() else (self.base_dir / p)
+
     def _is_video_file(self, filepath):
         if not filepath:
             return False
@@ -46,7 +69,39 @@ class StoryRenderer:
         p = Path(filepath)
         return p.exists() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
 
-    # --------------------------- Core Rendering ---------------------------
+    def _compute_uniform_gap(self, scenes):
+        ug = self.metadata.get("uniform_gap")
+        if isinstance(ug, (int, float)) and ug >= 0:
+            return float(ug)
+
+        gaps = []
+        for i in range(1, len(scenes)):
+            a = scenes[i - 1]
+            b = scenes[i]
+            if ("end" in a or "duration" in a) and ("start" in b or "start_time" in b):
+                a_end = None
+                if "end" in a:
+                    a_end = float(a["end"])
+                elif "duration" in a and ("start" in a or "start_time" in a):
+                    a_start = float(a.get("start", a.get("start_time", 0.0)))
+                    a_end = a_start + float(a["duration"])
+
+                b_start = float(b.get("start", b.get("start_time", 0.0)))
+
+                if a_end is not None:
+                    g = b_start - a_end
+                    if g >= -0.05:
+                        gaps.append(max(0.0, g))
+
+        if gaps:
+            med = statistics.median(gaps)
+            if len(gaps) > 1:
+                spread = max(gaps) - min(gaps)
+                if spread > 0.02:
+                    print(f"⚠️  Hinweis: GAPs variieren (min={min(gaps):.3f}s, max={max(gaps):.3f}s, median={med:.3f}s). Nutze Median.")
+            return float(med)
+
+        return 0.0
 
     def render_story_video(
         self,
@@ -62,9 +117,11 @@ class StoryRenderer:
         outro_file=None,
         outro_duration=None,
         fade_duration=1.0,
+        transition_in_delay=0.0,
+        transition_out_delay=0.0,
     ):
         print("=" * 60)
-        print("🎬 STORY-RENDERER")
+        print("🎬 STORY-RENDERER (GAP/XFADE)")
         print("=" * 60)
         print(f"\n📁 Bilder:   {self.images_dir}")
         print(f"🎵 Hörbuch:  {audiobook_file}")
@@ -73,7 +130,6 @@ class StoryRenderer:
         print(f"🎭 Transition: {transition} (fade_d={fade_duration:.2f}s)")
         print(f"🎞️ FPS: {fps}")
 
-        # Qualitätsprofile
         if quality == "hd":
             width, height = 1920, 1080
             bitrate = "8M"
@@ -81,74 +137,62 @@ class StoryRenderer:
             preset = "medium"
             suffix = ""
         else:
-            width, height = 854, 480
-            bitrate = "2M"
-            audio_bitrate = "128k"
-            preset = "fast"
+            width, height = 640, 360
+            bitrate = "800k"
+            audio_bitrate = "96k"
+            preset = "veryfast"
             suffix = "_sd"
 
         output_file = self.output_dir / f"story{suffix}.mp4"
 
-        # --- Segmentliste aufbauen ---
-        segments = []
         head_silence = float(self.metadata.get("head_silence", 0.0))
         tail_silence = float(self.metadata.get("tail_silence", 0.0))
         scenes = self.metadata.get("scenes", [])
+        total_duration = float(self.metadata.get("total_duration", 0.0))
 
-        # --- Intro ---
-        if intro_file and Path(intro_file).exists() and intro_duration > 0:
-            if abs(head_silence - intro_duration) > 0.25:
-                print(f"⚠️  Hinweis: head_silence ({head_silence:.2f}s) ≠ intro_duration ({intro_duration:.2f}s)")
-            segments.append({
-                "type": "intro",
-                "src": intro_file,
-                "duration": intro_duration,
-            })
+        uniform_gap = self._compute_uniform_gap(scenes)
+        print(f"\n⏱️  Uniform GAP: {uniform_gap:.3f} s")
+
+        intro_file = self._resolve(intro_file)
+        outro_file = self._resolve(outro_file)
+        overlay_file = self._resolve(overlay_file)
+
+        segments = []
+
+        if intro_file and intro_file.exists() and intro_duration > 0:
+            segments.append({"type": "intro", "src": str(intro_file), "duration": float(intro_duration)})
         elif head_silence > 0:
-            segments.append({
-                "type": "intro_silence",
-                "src": None,
-                "duration": head_silence,
-            })
+            segments.append({"type": "intro_silence", "src": None, "duration": float(head_silence)})
 
-        # --- Szenen ---
         for s in scenes:
-            scene_id = int(s["scene_id"])
-            duration = float(s["duration"])
+            scene_id = int(s.get("scene_id", s.get("id", 0)))
+            if "duration" in s:
+                base_dur = float(s["duration"])
+            elif "start" in s and "end" in s:
+                base_dur = float(s["end"]) - float(s["start"])
+            else:
+                raise ValueError("Szenen benötigen entweder 'duration' oder ('start' und 'end').")
+
+            seg_dur = max(0.01, base_dur + 2 * uniform_gap)
             image_file = self.images_dir / f"image_{scene_id:04d}.png"
             segments.append({
                 "type": "scene",
                 "src": str(image_file),
                 "scene_id": scene_id,
-                "duration": duration,
+                "duration": seg_dur,
+                "base_duration": base_dur,
             })
 
-        # --- Outro ---
-        if outro_file and Path(outro_file).exists():
-            dur = outro_duration or tail_silence or intro_duration
-            if abs(tail_silence - dur) > 0.25:
-                print(f"⚠️  Hinweis: tail_silence ({tail_silence:.2f}s) ≠ outro_duration ({dur:.2f}s)")
-            segments.append({
-                "type": "outro",
-                "src": outro_file,
-                "duration": dur,
-            })
+        if outro_file and outro_file.exists():
+            dur = float(outro_duration or tail_silence or intro_duration)
+            segments.append({"type": "outro", "src": str(outro_file), "duration": dur})
         elif tail_silence > 0:
-            segments.append({
-                "type": "outro_silence",
-                "src": None,
-                "duration": tail_silence,
-            })
+            segments.append({"type": "outro_silence", "src": None, "duration": float(tail_silence)})
 
-        print(f"\n🧩 Segmente: {len(segments)}")
-        print(f"   Intro: {intro_file or '–'} ({intro_duration:.2f}s)")
-        print(f"   Outro: {outro_file or '–'} ({(outro_duration or tail_silence):.2f}s)")
-        print(f"   Szenen: {len(scenes)}  | Audio: {self.metadata.get('total_duration', 0)/60:.1f} Min")
-
-        # --- Temp Clips ---
         temp_dir = self.output_dir / "temp_clips"
         temp_dir.mkdir(exist_ok=True)
         clip_files = []
+        clip_durations = []
 
         for idx, seg in enumerate(segments, 1):
             seg_type = seg["type"]
@@ -159,8 +203,7 @@ class StoryRenderer:
             inputs = []
             filters = []
 
-            # --- Hintergrundquelle ---
-            if seg_type in ("scene",):
+            if seg_type == "scene":
                 if not src or not Path(src).exists():
                     inputs += ["-f", "lavfi", "-t", f"{seg_dur:.3f}", "-i",
                                f"color=c=black:s={width}x{height}:r={fps}"]
@@ -168,39 +211,33 @@ class StoryRenderer:
                 else:
                     inputs += ["-loop", "1", "-t", f"{seg_dur:.3f}", "-r", str(fps), "-i", str(src)]
                     bg_label = "[0:v]"
-            elif seg_type in ("intro", "outro"):
-                if self._is_video_file(src):
-                    inputs += ["-stream_loop", "-1", "-t", f"{seg_dur:.3f}", "-i", str(src)]
-                elif self._is_image_file(src):
-                    inputs += ["-loop", "1", "-t", f"{seg_dur:.3f}", "-r", str(fps), "-i", str(src)]
-                else:
-                    inputs += ["-f", "lavfi", "-t", f"{seg_dur:.3f}", "-i",
-                               f"color=c=black:s={width}x{height}:r={fps}"]
-                bg_label = "[0:v]"
             else:
                 inputs += ["-f", "lavfi", "-t", f"{seg_dur:.3f}", "-i",
                            f"color=c=black:s={width}x{height}:r={fps}"]
                 bg_label = "[0:v]"
 
-            # --- Overlay ---
             ov_in = None
-            if overlay_file and Path(overlay_file).exists():
+            if overlay_file and overlay_file.exists():
                 if self._is_video_file(overlay_file):
                     inputs += ["-stream_loop", "-1", "-t", f"{seg_dur:.3f}", "-i", str(overlay_file)]
-                    ov_in = "[1:v]"
+                    ov_in = f"[1:v]"
                 elif self._is_image_file(overlay_file):
                     inputs += ["-loop", "1", "-t", f"{seg_dur:.3f}", "-r", str(fps), "-i", str(overlay_file)]
-                    ov_in = "[1:v]"
+                    ov_in = f"[1:v]"
 
-            # --- Filter ---
-            base = f"{bg_label}scale={width}:{height}:force_original_aspect_ratio=decrease," \
-                   f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+            base = (
+                f"{bg_label}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+            )
             if vignette:
                 base += ",vignette=PI/6"
+
             if transition == "fade" and seg_type == "scene" and fade_duration > 0:
-                base += f",fade=t=in:st=0:d={fade_duration:.3f}"
-                if seg_dur > fade_duration:
-                    base += f",fade=t=out:st={max(0.0, seg_dur - fade_duration):.3f}:d={fade_duration:.3f}"
+                fade_in_start = max(0.0, uniform_gap - fade_duration + transition_in_delay)
+                fade_out_start = max(0.0, seg_dur - uniform_gap + transition_out_delay)
+                base += f",fade=t=in:st={fade_in_start:.3f}:d={fade_duration:.3f}"
+                base += f",fade=t=out:st={fade_out_start:.3f}:d={fade_duration:.3f}"
+
             base += "[base]"
             filters.append(base)
 
@@ -216,6 +253,7 @@ class StoryRenderer:
                 "-filter_complex", ";".join(filters),
                 "-map", out_label,
                 "-r", str(fps),
+                "-an",
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-pix_fmt", "yuv420p",
@@ -224,120 +262,129 @@ class StoryRenderer:
             ]
 
             result = subprocess.run(cmd, capture_output=True)
-            if result.returncode != 0 or not clip_path.exists():
+            if result.returncode != 0 or not clip_path.exists() or clip_path.stat().st_size < 1000:
                 print(f"   ✗ Segment {idx} fehlgeschlagen ({seg_type})")
-                print(result.stderr.decode()[:300])
                 continue
 
             clip_files.append(clip_path)
-            print(f"   ✓ Segment {idx}/{len(segments)} erstellt ({seg_type}, {seg_dur:.3f}s)")
+            clip_durations.append(seg_dur)
 
-        if not clip_files:
-            print("\n❌ Keine Clips erstellt – Abbruch")
+        merged_video = self._xfade_merge(
+            clip_files=clip_files,
+            durations=clip_durations,
+            overlap_duration=max(0.0, 2 * uniform_gap),
+            fps=fps,
+            preset=preset,
+            bitrate=bitrate,
+        )
+
+        if not merged_video:
+            print("\n❌ XFADE-Merge fehlgeschlagen!")
             return None
 
-        print(f"\n📹 {len(clip_files)} Clips erstellt, kombiniere…")
-
-        # --- Concat ---
-        concat_file = temp_dir / "concat_list.txt"
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for clip in clip_files:
-                f.write(f"file '{clip.as_posix()}'\n")
-
+        hard_cap = total_duration if total_duration > 0 else None
         cmd = [
             "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-i", str(merged_video),
             "-i", str(audiobook_file),
+            "-map", "0:v", "-map", "1:a",
             "-c:v", "libx264", "-preset", preset, "-b:v", bitrate,
             "-c:a", "aac", "-b:a", audio_bitrate,
             "-movflags", "+faststart",
             "-shortest",
-            str(output_file)
         ]
-        result = subprocess.run(cmd, capture_output=True)
+        if hard_cap:
+            cmd += ["-t", f"{hard_cap:.3f}"]
+        cmd += [str(output_file)]
 
-        # Cleanup
-        try:
-            for clip in clip_files:
-                clip.unlink(missing_ok=True)
-            concat_file.unlink(missing_ok=True)
-            temp_dir.rmdir()
-        except Exception:
-            pass
+        subprocess.run(cmd, capture_output=True)
+        return output_file
 
-        if result.returncode == 0 and output_file.exists():
-            size_mb = output_file.stat().st_size / (1024 ** 2)
-            print(f"\n✅ Video: {output_file.name} ({size_mb:.1f} MB)")
-            return output_file
-        else:
-            print("\n❌ Rendering fehlgeschlagen")
-            print(result.stderr.decode()[:600])
-            return None
+    def _xfade_merge(self, clip_files, durations, overlap_duration, fps, preset, bitrate):
+        if len(clip_files) == 1:
+            return clip_files[0]
 
-    def render_both_qualities(self, audiobook_file, **kwargs):
-        results = {}
-        print("📹 Rendere HD-Version…")
-        hd = self.render_story_video(audiobook_file, quality="hd", **kwargs)
-        if hd:
-            results["hd"] = hd
-        print("\n📹 Rendere SD-Version…")
-        sd = self.render_story_video(audiobook_file, quality="sd", **kwargs)
-        if sd:
-            results["sd"] = sd
+        cmd = ["ffmpeg", "-y"]
+        for p in clip_files:
+            cmd += ["-i", str(p)]
 
-        print(f"\n{'=' * 60}")
-        print("✅ VIDEO-RENDERING FERTIG!")
-        if "hd" in results:
-            print(f"   HD: {results['hd']}")
-        if "sd" in results:
-            print(f"   SD: {results['sd']}")
-        print(f"{'=' * 60}")
-        return results
+        filter_parts = []
+        last_label = f"[0:v]"
+        filter_parts.append(f"{last_label}fps={fps},format=yuv420p[v0]")
+        current_label = "[v0]"
+
+        for i in range(1, len(clip_files)):
+            prev_dur = float(durations[i - 1])
+            this_dur = float(durations[i])
+            eff_overlap = min(overlap_duration, prev_dur * 0.3, this_dur * 0.3)
+            eff_overlap = max(0.0, eff_overlap)
+            offset = max(0.0, prev_dur - eff_overlap)
+
+            filter_parts.append(f"[{i}:v]fps={fps},format=yuv420p[v{i}in]")
+            filter_parts.append(
+                f"{current_label}[v{i}in]xfade=transition=fade:duration={eff_overlap:.6f}:offset={offset:.6f}[v{i}]"
+            )
+            current_label = f"[v{i}]"
+
+        out_label = current_label
+        cmd += [
+            "-filter_complex", ";".join(filter_parts),
+            "-map", out_label,
+            "-an",
+            "-c:v", "libx264", "-preset", preset, "-b:v", bitrate,
+            "-pix_fmt", "yuv420p",
+            str(self.output_dir / "_merged_video_tmp.mp4")
+        ]
+
+        subprocess.run(cmd, capture_output=True)
+        return self.output_dir / "_merged_video_tmp.mp4"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Story-Renderer: Video aus Hörbuch + Bildern (+ Intro/Outro + Overlay)")
-    parser.add_argument("--path", required=True, help="Basis-Pfad für Eingabe- und Ausgabedateien")
-    parser.add_argument("--images", default=None, help="Verzeichnis mit Bildern (image_XXXX.png)")
-    parser.add_argument("--audiobook", default=None, help="Komplettes Hörbuch-Audio (WAV)")
-    parser.add_argument("--metadata", default=None, help="Audiobook-Metadaten (JSON)")
-    parser.add_argument("--output", default=None, help="Output-Verzeichnis")
-
-    parser.add_argument("--quality", choices=["hd", "sd", "both"], default="both", help="Video-Qualität")
-    parser.add_argument("--transition", choices=["none", "fade"], default="fade", help="Szenen-Übergang")
-    parser.add_argument("--fade-duration", type=float, default=1.0, help="Fade-Dauer in Sekunden")
-    parser.add_argument("--vignette", action="store_true", help="Vignette-Effekt aktivieren")
-
-    parser.add_argument("--overlay", help="Overlay-Datei (Video oder Bild, geloopt)")
-    parser.add_argument("--overlay-opacity", type=float, default=0.3, help="Overlay-Transparenz 0.0–1.0")
+    parser = argparse.ArgumentParser(description="Story-Renderer mit dynamischen Fades und GAP/XFADE")
+    parser.add_argument("--path", required=True)
+    parser.add_argument("--images", default=None)
+    parser.add_argument("--audiobook", default=None)
+    parser.add_argument("--metadata", default=None)
+    parser.add_argument("--output", default=None)
+    parser.add_argument("--quality", choices=["hd", "sd"], default="sd")
+    parser.add_argument("--transition", choices=["none", "fade"], default="fade")
+    parser.add_argument("--fade-duration", type=float, default=2.0)
+    parser.add_argument("--transition-in-delay", type=float, default=0.0)
+    parser.add_argument("--transition-out-delay", type=float, default=0.0)
+    parser.add_argument("--vignette", action="store_false")
+    parser.add_argument("--overlay", default="particel.mp4")
+    parser.add_argument("--overlay-opacity", type=float, default=0.3
     parser.add_argument("--fps", type=int, default=30, help="Ziel-Framerate")
 
-    # NEU: Getrennte Intro-/Outro-Konfiguration
-    parser.add_argument("--intro", help="Intro-Datei (Video/Bild)")
+    parser.add_argument("--intro", default="intro.mp4", help="Intro-Datei (Video/Bild)")
     parser.add_argument("--intro-duration", type=float, default=10.0, help="Intro-Dauer in Sekunden")
-    parser.add_argument("--outro", help="Outro-Datei (Video/Bild)")
-    parser.add_argument("--outro-duration", type=float, default=None, help="Outro-Dauer in Sekunden")
+    parser.add_argument("--outro", default="outro.mp4", help="Outro-Datei (Video/Bild)")
+    parser.add_argument("--outro-duration", type=float, default=10.0, help="Outro-Dauer in Sekunden")
 
     args = parser.parse_args()
     base_path = args.path
 
-    # Pfade prüfen
-    if not Path(args.audiobook).exists():
-        print(f"❌ Hörbuch nicht gefunden: {args.audiobook}")
+    audiobook_path = args.audiobook or os.path.join(base_path, "audiobook", "complete_audiobook.wav")
+    metadata_path = args.metadata or os.path.join(base_path, "audiobook", "audiobook_metadata.json")
+
+    if not Path(audiobook_path).exists():
+        print(f"❌ Hörbuch nicht gefunden: {audiobook_path}")
         return
-    if not Path(args.metadata).exists():
-        print(f"❌ Metadaten nicht gefunden: {args.metadata}")
+    if not Path(metadata_path).exists():
+        print(f"❌ Metadaten nicht gefunden: {metadata_path}")
         return
 
     renderer = StoryRenderer(
         images_dir=args.images or os.path.join(base_path, "images"),
-        audiobook_metadata=args.metadata or os.path.join(base_path, "audiobook", "audiobook_metadata.json"),
+        audiobook_metadata=metadata_path,
         output_dir=args.output or os.path.join(base_path, "story")
     )
 
     common = dict(
         transition=args.transition,
         fade_duration=args.fade_duration,
+        transition_gap=args.transition_gap,
         vignette=args.vignette,
         overlay_file=args.overlay,
         overlay_opacity=args.overlay_opacity,
@@ -349,9 +396,9 @@ def main():
     )
 
     if args.quality == "both":
-        renderer.render_both_qualities(audiobook_file=args.audiobook, **common)
+        renderer.render_both_qualities(audiobook_file=audiobook_path, **common)
     else:
-        renderer.render_story_video(audiobook_file=args.audiobook, quality=args.quality, **common)
+        renderer.render_story_video(audiobook_file=audiobook_path, quality=args.quality, **common)
 
     print("\n🎉 Story-Rendering abgeschlossen!")
 

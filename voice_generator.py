@@ -56,75 +56,92 @@ class SceneBasedAudiobookGenerator:
         with open(self.progress_file, 'w') as f:
             json.dump(progress, f, indent=2)
 
-    def split_scene_into_chunks(self, scene_text, max_chunk_length=250):
+    def split_scene_into_chunks(self, scene_text, max_chunk_length=350):
         """
-        Teilt Szenentext in TTS-optimierte Chunks
-        Behält die Logik vom Original bei
+        Teilt Szenentext in TTS-optimierte Chunks.
+        Trennt an Satzgrenzen, achtet auf Lesbarkeit für XTTS.
+        Keine künstlichen Pausen eingefügt (das übernimmst du beim Zusammenfügen).
         """
         import re
-        
-        problem_endings = [
-            'sein', 'werden', 'haben', 'können', 'müssen',
-            'sollen', 'wollen', 'dürfen', 'mögen'
-        ]
 
+        # Vorreinigung: Steuerzeichen raus, Whitespaces vereinheitlichen
         text = scene_text.replace('_', ' ')
         text = re.sub(r'\s+', ' ', text).strip()
 
+        # Satzweise splitten – unterstützt ., !, ?, … 
         sentences = re.split(r'(?<=[.!?…])\s+', text)
         chunks = []
         current_chunk = ""
 
-        for sentence in sentences:
-            s = sentence.strip()
+        for s in sentences:
+            s = s.strip()
             if not s:
                 continue
 
             # Unicode-Säuberung
             s = s.replace('\u00A0', ' ').replace('\u202f', ' ').strip()
 
-            # Prüfe auf problematisches Satzende
-            matched = False
-            for ending in problem_endings:
-                if re.search(rf'\b{ending}\b[\s\.\!\?…"\']*$', s, re.IGNORECASE):
-                    s = re.sub(r'[\.\!\?…"\']+\s*$', '', s).strip()
-                    if current_chunk.strip():
-                        chunks.append(current_chunk.strip())
-                        current_chunk = ""
-                    chunks.append(s)
-                    matched = True
-                    break
-            if matched:
-                continue
-
-            # Satz zu lang? Split bei Kommas
+            # Falls Satz zu lang, bei Kommas oder Doppelpunkten teilen
             if len(s) > max_chunk_length:
-                parts = re.split(r'(?<=[,;—–])\s+', s)
-                for part in parts:
-                    if len(current_chunk) + len(part) > max_chunk_length and current_chunk:
-                        chunks.append(current_chunk.strip())
-                        current_chunk = part + " "
-                    else:
-                        current_chunk += part + " "
+                parts = re.split(r'(?<=[,;:—–])\s+', s)
             else:
-                if len(current_chunk) + len(s) > max_chunk_length and current_chunk:
+                parts = [s]
+
+            for part in parts:
+                if len(current_chunk) + len(part) > max_chunk_length and current_chunk:
                     chunks.append(current_chunk.strip())
-                    current_chunk = s + " "
+                    current_chunk = part + " "
                 else:
-                    current_chunk += s + " "
+                    current_chunk += part + " "
 
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
 
         return chunks
 
-    def prepare_text_for_xtts(self, text):
-        """Entfernt technische Sonderzeichen"""
+
+    def prepare_text_for_xtts(self, raw_text: str) -> str:
+        """
+        Bereitet Text für XTTS v2 vor:
+        - entfernt technische Zeichen
+        - ersetzt typografische Sonderzeichen
+        - schützt Zahlen mit Punkt (17. -> 17-tes)
+        - ersetzt Guillemets («») und Gedankenstriche
+        - normalisiert Anführungen und Leerzeichen
+        """
         import re
-        text = text.strip()
-        text = text.replace('_', '').replace('*', '').replace('#', '').replace('|', '')
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
+
+        t = raw_text.strip()
+
+        # Steuerzeichen entfernen
+        t = t.replace('_', '').replace('*', '').replace('#', '').replace('|', '')
+
+        # Guillemets und typografische Quotes
+        t = t.replace("«", '"').replace("»", '"').replace("„", '"').replace("“", '"').replace("‚", "'").replace("‘", "'")
+
+        # Gedankenstriche / lange Bindestriche zu Komma-Pausen
+        t = re.sub(r'\s*[–—]\s*', ', ', t)
+
+        # Punkt hinter Zahl → schützen
+        t = re.sub(r'(\d+)\.', r'\1-tes', t)
+
+        # Drei Punkte normalisieren (XTTS liest sonst zu lange Pausen)
+        t = re.sub(r'\.{3,}', '...', t)
+
+        # Zeilenumbrüche vereinheitlichen
+        t = re.sub(r'\s+', ' ', t)
+
+        # Typische Anführungszeichen fixen
+        t = t.replace('“', '"').replace('”', '"').replace('„', '"')
+
+        # Nach Satzzeichen ein Leerzeichen erzwingen
+        t = re.sub(r'([.!?])([A-ZÄÖÜ])', r'\1 \2', t)
+
+        # Letzter Feinschliff
+        t = t.strip()
+
+        return t
+
     
     def generate_chunk_audio(self, tts, chunk_text, scene_id, chunk_id):
         """Generiert Audio für einen Chunk"""
@@ -318,18 +335,18 @@ def main():
     # --- CONFIG ---
     CONFIG = {
         # Stimmen / Modell (bleibt unverändert)
-        "model_path": "/workspace/voices/franziska300",
-        "config_path": "/workspace/voices/franziska300/config.json",
-        "speaker_wav": "/workspace/voices/franziska300/dataset/wavs/die-faelle-des-prof-machata_00000141.wav",
+        "model_path": "/workspace/storypainter/voices/franziska300",
+        "config_path": "/workspace/storypainter/voices/franziska300/config.json",
+        "speaker_wav": "/workspace/storypainter/voices/franziska300/dataset/wavs/die-faelle-des-prof-machata_00000141.wav",
 
         # Eingabe / Ausgabe (werden dynamisch kombiniert)
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
         "output_dir": os.path.join(base_path, "tts"),
 
         # TTS-Einstellungen
-        "max_chunk_length": 200,
+        "max_chunk_length": 440,
         "language": "de",
-        "temperature": 0.65,
+        "temperature": 0.60,
         "repetition_penalty": 2.0,
     }
     

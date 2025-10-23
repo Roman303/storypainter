@@ -121,10 +121,7 @@ class SceneWavCombiner:
 def main():
     parser = argparse.ArgumentParser(description="Kombiniert Chunk-WAVs zu Szenen-WAVs")
 
-    # Nur path ist Pflicht
     parser.add_argument("--path", required=True, help="Basis-Pfad für Eingabe- und Ausgabedateien")
-
-    # Alle anderen Werte sind flexibel (überschreibbar)
     parser.add_argument("--input", default=None, help="Input-Verzeichnis mit Chunks")
     parser.add_argument("--output", default=None, help="Output-Verzeichnis für Szenen")
     parser.add_argument("--pause", type=int, default=300, help="Pause zwischen Chunks in ms (Standard: 300)")
@@ -132,18 +129,14 @@ def main():
     args = parser.parse_args()
     base_path = args.path
 
-    # --- CONFIG ---
     CONFIG = {
-        # Eingabe / Ausgabe
         "input": args.input or os.path.join(base_path, "tts"),
         "output": args.output or os.path.join(base_path, "scenes"),
-
-        # Verarbeitung
         "pause": args.pause,
     }
     
-    combiner = SceneWavCombiner(args.input, args.output)
-    combiner.combine_all_scenes(pause_ms=args.pause)
+    combiner = SceneWavCombiner(CONFIG["input"], CONFIG["output"])
+    combiner.combine_all_scenes(pause_ms=CONFIG["pause"])
 
 
 if __name__ == "__main__":

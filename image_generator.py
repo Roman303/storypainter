@@ -9,7 +9,7 @@ from pathlib import Path
 import json
 import time
 import argparse
-
+import os
 
 class AudiobookImageGenerator:
     def __init__(self, 
@@ -146,7 +146,7 @@ class AudiobookImageGenerator:
             
             # ✅ STYLE ZUM PROMPT HINZUFÜGEN
             if style and style.lower() not in prompt.lower():
-                enhanced_prompt = f"{style},{prompt}"
+                enhanced_prompt = f"{prompt},{style}"
                 print(f"   🎨 Style hinzugefügt: {style[:50]}...")
             else:
                 enhanced_prompt = prompt
@@ -162,7 +162,7 @@ class AudiobookImageGenerator:
             
             # Generiere Bild
             print(f"[{i:04d}/{len(scenes)}] 🎨 Generiere Bild...")
-            print(f"         Prompt: {enhanced_prompt[:380]}...")
+            print(f"         Prompt: {enhanced_prompt[:800]}...")
             
             start = time.time()
             try:
@@ -232,7 +232,7 @@ def main():
     # --- CONFIG ---
     CONFIG = {
         # Eingabe / Ausgabe (aus --path zusammengesetzt)
-        "metadata_file": os.path.join(base_path, "book_metadata.json"),
+        "metadata_file": os.path.join(base_path, "book_scenes.json"),
         "output_dir": os.path.join(base_path, "images"),
 
         # Generator-Einstellungen
