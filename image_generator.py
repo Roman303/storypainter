@@ -10,7 +10,13 @@ import json
 import time
 import argparse
 import os
-
+try:
+    import xformers
+    pipe.enable_xformers_memory_efficient_attention()
+    print("✅ xFormers aktiviert (Memory Efficient Attention)")
+except Exception as e:
+    print(f"⚠️ xFormers nicht aktivierbar: {e}")
+    
 from fx_system import apply_fx
 
 class AudiobookImageGenerator:
