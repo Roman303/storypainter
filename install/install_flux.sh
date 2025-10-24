@@ -8,30 +8,12 @@ set -e
 echo "🚀 Starte FLUX.1 Installation (automatisch)..."
 
 # --------------------------------------------------------------
-# 1️⃣ Workspace prüfen (Overlay vermeiden)
-# --------------------------------------------------------------
-if df -T /workspace | grep -q overlay; then
-    echo "⚙️ /workspace liegt auf Overlay – verlinke auf /root/workspace..."
-    rm -rf /workspace
-    mkdir -p /root/workspace
-    ln -s /root/workspace /workspace
-    echo "✅ /workspace zeigt jetzt auf /root/workspace"
-fi
-# --------------------------------------------------------------
 # Sicherstellen, dass python3-venv installiert ist
 # --------------------------------------------------------------
 if ! dpkg -l | grep -q python3-venv; then
     echo "📦 Installiere python3-venv..."
     apt update && apt install -y python3-venv
 fi
-
-# --------------------------------------------------------------
-# 2️⃣ Cache-Verzeichnisse
-# --------------------------------------------------------------
-export HF_HOME=/workspace/cache/hf
-export TRANSFORMERS_CACHE=/workspace/cache/hf
-export TORCH_HOME=/workspace/cache/torch
-mkdir -p /workspace/cache/hf /workspace/cache/torch
 
 # --------------------------------------------------------------
 # 3️⃣ Virtuelle Umgebung erstellen
