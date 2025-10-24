@@ -17,6 +17,13 @@ if df -T /workspace | grep -q overlay; then
     ln -s /root/workspace /workspace
     echo "✅ /workspace zeigt jetzt auf /root/workspace"
 fi
+# --------------------------------------------------------------
+# Sicherstellen, dass python3-venv installiert ist
+# --------------------------------------------------------------
+if ! dpkg -l | grep -q python3-venv; then
+    echo "📦 Installiere python3-venv..."
+    apt update && apt install -y python3-venv
+fi
 
 # --------------------------------------------------------------
 # 2️⃣ Cache-Verzeichnisse
@@ -27,18 +34,7 @@ export TORCH_HOME=/workspace/cache/torch
 mkdir -p /workspace/cache/hf /workspace/cache/torch
 
 # --------------------------------------------------------------
-# 3️⃣ Hugging Face Login
-# --------------------------------------------------------------
-if [ -z "$HUGGINGFACE_HUB_TOKEN" ]; then
-    echo "⚠️  Kein HUGGINGFACE_HUB_TOKEN gefunden!"
-    echo "Bitte vorher exportieren, z.B.:"
-    echo "export HUGGINGFACE_HUB_TOKEN=hf_xxxxxxxxx"
-    exit 1
-fi
-huggingface-cli login --token $HUGGINGFACE_HUB_TOKEN --add-to-git-credential
-
-# --------------------------------------------------------------
-# 4️⃣ Virtuelle Umgebung
+# 3️⃣ Virtuelle Umgebung erstellen
 # --------------------------------------------------------------
 echo "🐍 Erstelle virtuelle Umgebung..."
 rm -rf /workspace/flux_env
@@ -46,6 +42,22 @@ python3 -m venv /workspace/flux_env
 source /workspace/flux_env/bin/activate
 
 pip install --upgrade pip setuptools wheel
+
+# --------------------------------------------------------------
+# 4️⃣ Hugging Face Login (nach Aktivierung der venv)
+# --------------------------------------------------------------
+if [ -z "$HUGGINGFACE_HUB_TOKEN" ]; then
+    echo "⚠️  Kein HUGGINGFACE_HUB_TOKEN gefunden!"
+    echo "Bitte exportiere deinen Token vor dem Start z.B.:"
+    echo "export HUGGINGFACE_HUB_TOKEN=hf_xxxxxxxxxxxxxxxxxx"
+    exit 1
+fi
+
+echo "📦 Installiere huggingface_hub..."
+pip install --upgrade huggingface_hub
+
+echo "🔐 Logge dich bei Hugging Face ein..."
+/workspace/flux_env/bin/huggingface-cli login --token $HUGGINGFACE_HUB_TOKEN --add-to-git-credential
 
 # --------------------------------------------------------------
 # 5️⃣ CUDA-Version automatisch erkennen
