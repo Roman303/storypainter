@@ -48,8 +48,8 @@ pip install \
 # Invisible Watermark (optional, SDXL nutzt es manchmal)
 pip install invisible-watermark
 
-# xformers → optional (nur wenn du mehr VRAM hast)
-# pip install xformers==0.0.25
+# xformers → optional (nur wenn du mehr VRAM hast 4080 A4000)
+pip install xformers==0.0.25
 
 # ------------------------------------------------------
 # Systemabhängigkeiten
