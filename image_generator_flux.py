@@ -40,7 +40,7 @@ class FluxImageGenerator:
 
         # Auflösung wählen
         if output_format == "16:9":
-            self.width, self.height = 1600, 900
+            self.width, self.height = 1344, 768
         else:
             self.width, self.height = 1024, 1024
 
@@ -57,9 +57,11 @@ class FluxImageGenerator:
             self.pipe.enable_model_cpu_offload()
             self.pipe.enable_attention_slicing()
             self.pipe.enable_vae_slicing()
+            self.pipe.enable_sequential_cpu_offload()
+            self.pipe.enable_vae_tiling()
 
             print("✅ Modell erfolgreich geladen und optimiert!\n")
-
+            
         except Exception as e:
             print(f"❌ Fehler beim Laden des Modells: {e}")
             print("💡 Prüfe Internet, Token und GPU-Kompatibilität.")
@@ -69,29 +71,34 @@ class FluxImageGenerator:
     # 🔮 Einzelbild generieren
     # ----------------------------------------------------
     def generate_image(self,
-                       prompt,
-                       negative_prompt="text, watermark, low quality, blurry, distorted",
-                       num_inference_steps=25,
-                       guidance_scale=4.0,
-                       seed=None):
+                   prompt,
+                   negative_prompt="Avoid: lowres, blurry, deformed, extra limbs, text, watermark, logo, cgi, 3d render, cartoon, anime, digital art, modern, photography, sharp digital edges, overprocessed, unrealistic skin, oversaturated.",
+                   num_inference_steps=25,
+                   guidance_scale=4.0,
+                   seed=None):
         """
         Generiert ein einzelnes Bild mit FLUX.1
         """
         generator = torch.Generator(device="cuda").manual_seed(seed) if seed else None
-
+    
         try:
-            result = self.pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
+            # Negative Prompt sprachlich anhängen (da nicht mehr unterstützt)
+            if negative_prompt:
+                full_prompt = f"{prompt}, but avoid: {negative_prompt}"
+            else:
+                full_prompt = prompt
+    
+            image = self.pipe(
+                prompt=full_prompt,
                 width=self.width,
                 height=self.height,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 generator=generator
             ).images[0]
-
-            return result
-
+    
+            return image  # <-- hier 'image', nicht 'result'
+    
         except Exception as e:
             print(f"❌ Fehler bei der Bildgenerierung: {e}")
             raise
@@ -134,7 +141,7 @@ class FluxImageGenerator:
 
         for i, scene in enumerate(scenes, 1):
             prompt = scene.get("image_prompt", "")
-            negative = scene.get("negative_prompt", "text, watermark, low quality, blurry")
+            negative = scene.get("lowres, blurry, deformed, extra limbs, text, watermark, logo, cgi, 3d render, cartoon, anime, digital art, modern photography, sharp digital edges, overprocessed, unrealistic skin, oversaturated")
 
             if style.lower() not in prompt.lower():
                 prompt = f"{style}, {prompt}"
@@ -146,7 +153,7 @@ class FluxImageGenerator:
                 continue
 
             print(f"[{i:04d}/{len(scenes)}] 🎨 Generiere Bild...")
-            print(f"         Prompt: {prompt[:150]}...")
+            print(f"         Prompt: {prompt[:850]}...")
 
             start = time.time()
             try:
@@ -197,8 +204,8 @@ def main():
     try:
         generator = FluxImageGenerator(output_format="16:9")
         images = generator.generate_from_json(
-            metadata_file="root/workspace/storypainter/input/gegendaswelt/book_scenes (1).json",
-            output_dir="root/workspace/storypainter/input/gegendaswelt/images",
+            metadata_file="/workspace/storypainter/input/gegendaswelt/book_scenes.json",
+            output_dir="/workspace/storypainter/input/gegendaswelt/images",
             quality_preset="balanced"
         )
         print(f"\n🎉 {len(images)} FLUX.1 Bilder fertig!")

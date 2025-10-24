@@ -11,6 +11,8 @@ import time
 import argparse
 import os
 
+from fx_system import apply_fx
+
 class AudiobookImageGenerator:
     def __init__(self, 
                  model_name="stabilityai/stable-diffusion-xl-base-1.0",
@@ -119,6 +121,7 @@ class AudiobookImageGenerator:
         book_info = metadata.get("book_info", {})
         style = book_info.get("style", "cinematic")
         total_scenes = book_info.get("total_scenes", 0)
+        fx_type = book_info.get("fx", "none")
         
         print(f"🎨 Style aus JSON: {style}")
         print(f"📊 Szenen total: {total_scenes}")
@@ -173,6 +176,10 @@ class AudiobookImageGenerator:
                     guidance_scale=settings['guidance'],
                     seed=42 + scene_id  # Konsistente Seeds
                 )
+
+                if fx_type and fx_type != "none":
+                    image = apply_fx(image, fx_type)
+                    print(f"🎞️ FX angewendet: {fx_type}")
                 
                 # Speichere Bild
                 image.save(image_file, quality=95)
