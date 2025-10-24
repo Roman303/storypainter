@@ -1,81 +1,113 @@
 #!/bin/bash
-# FLUX.1 Installation - optimiert für Vast.ai + CUDA 11.8 + Ubuntu 22.04
+# ==============================================================
+# FLUX.1 Install Script – Automatische GPU/CUDA-Erkennung
+# Kompatibel mit RTX A4000 (CUDA 11.8) und RTX 4090 (CUDA 12.1)
+# ==============================================================
+
 set -e
+echo "🚀 Starte FLUX.1 Installation (automatisch)..."
 
-echo "🎨 FLUX.1 Installation (Black Forest Labs) wird gestartet..."
-
-# Sicherstellen, dass python3-venv verfügbar ist
-if ! dpkg -l | grep -q python3-venv; then
-    apt update && apt install -y python3-venv
+# --------------------------------------------------------------
+# 1️⃣ Workspace prüfen (Overlay vermeiden)
+# --------------------------------------------------------------
+if df -T /workspace | grep -q overlay; then
+    echo "⚙️ /workspace liegt auf Overlay – verlinke auf /root/workspace..."
+    rm -rf /workspace
+    mkdir -p /root/workspace
+    ln -s /root/workspace /workspace
+    echo "✅ /workspace zeigt jetzt auf /root/workspace"
 fi
 
-# Alte Environment entfernen (falls vorhanden)
-rm -rf /workspace/flux_env
+# --------------------------------------------------------------
+# 2️⃣ Cache-Verzeichnisse
+# --------------------------------------------------------------
+export HF_HOME=/workspace/cache/hf
+export TRANSFORMERS_CACHE=/workspace/cache/hf
+export TORCH_HOME=/workspace/cache/torch
+mkdir -p /workspace/cache/hf /workspace/cache/torch
 
-# Neue Environment erstellen
+# --------------------------------------------------------------
+# 3️⃣ Hugging Face Login
+# --------------------------------------------------------------
+if [ -z "$HUGGINGFACE_HUB_TOKEN" ]; then
+    echo "⚠️  Kein HUGGINGFACE_HUB_TOKEN gefunden!"
+    echo "Bitte vorher exportieren, z.B.:"
+    echo "export HUGGINGFACE_HUB_TOKEN=hf_xxxxxxxxx"
+    exit 1
+fi
+huggingface-cli login --token $HUGGINGFACE_HUB_TOKEN --add-to-git-credential
+
+# --------------------------------------------------------------
+# 4️⃣ Virtuelle Umgebung
+# --------------------------------------------------------------
+echo "🐍 Erstelle virtuelle Umgebung..."
+rm -rf /workspace/flux_env
 python3 -m venv /workspace/flux_env
 source /workspace/flux_env/bin/activate
 
-# Pip upgraden
-pip install --upgrade pip
+pip install --upgrade pip setuptools wheel
 
-# -------------------------------------------------------------
-# 🧠 PyTorch Installation
-# (optimiert für CUDA 11.8 – tested on Vast.ai)
-# -------------------------------------------------------------
-echo "🔥 Installiere PyTorch..."
-pip install torch==2.3.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# --------------------------------------------------------------
+# 5️⃣ CUDA-Version automatisch erkennen
+# --------------------------------------------------------------
+CUDA_VER=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+')
+echo "🔍 Erkannte CUDA Version: $CUDA_VER"
 
-# -------------------------------------------------------------
-# 📦 Core Dependencies für FLUX.1 (aktueller Stand 2025)
-# -------------------------------------------------------------
-echo "📦 Installiere benötigte Python-Pakete..."
+# --------------------------------------------------------------
+# 6️⃣ Passende Torch-Version auswählen
+# --------------------------------------------------------------
+if [[ "$CUDA_VER" == "11.8" ]]; then
+    echo "💾 Verwende Torch-Build für CUDA 11.8 (z. B. A4000)..."
+    pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu118
+    pip install xformers==0.0.26.post1
+elif [[ "$CUDA_VER" == "12.1" ]]; then
+    echo "💾 Verwende Torch-Build für CUDA 12.1 (z. B. 4090)..."
+    pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+    pip install xformers==0.0.27.post2
+else
+    echo "⚠️  Unbekannte CUDA-Version ($CUDA_VER). Standard: CUDA 11.8."
+    pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu118
+fi
+
+# --------------------------------------------------------------
+# 7️⃣ Diffusers / Transformers / Extras
+# --------------------------------------------------------------
+echo "📦 Installiere FLUX-Abhängigkeiten..."
 pip install \
-    "numpy<2.0.0" \
-    "huggingface_hub>=0.23.0" \
-    "diffusers>=0.31.0" \
-    "transformers>=4.43.0" \
-    "accelerate>=0.33.0" \
+    diffusers==0.31.0 \
+    transformers==4.46.1 \
+    accelerate==0.33.0 \
     safetensors \
-    pillow \
-    tqdm \
-    requests \
-    invisible-watermark \
-    sentencepiece
+    sentencepiece \
+    timm \
+    openai-clip \
+    "protobuf<5"
 
-# -------------------------------------------------------------
-# ⚡ Optional: xformers für effizientere Speicherverwaltung
-# (funktioniert stabil auf CUDA 11.8)
-# -------------------------------------------------------------
-echo "⚙️  Installiere xformers (optional, für Performance)..."
-pip install xformers==0.0.27.post2 || echo "⚠️  xformers optional – Übersprungen falls fehlgeschlagen."
-
-# -------------------------------------------------------------
-# 🧩 Systemlibs (für Pillow, Diffusers & OpenGL)
-# -------------------------------------------------------------
+# --------------------------------------------------------------
+# 8️⃣ Systemlibs
+# --------------------------------------------------------------
 apt update && apt install -y libgl1-mesa-glx libglib2.0-0
 
-# -------------------------------------------------------------
-# 🧪 Test der Installation
-# -------------------------------------------------------------
-echo ""
-echo "🧪 Teste FLUX.1-Umgebung..."
-python - <<'PYCODE'
-import torch
+# --------------------------------------------------------------
+# 9️⃣ Test: FLUX laden
+# --------------------------------------------------------------
+echo "🧪 Teste FLUX.1 Pipeline..."
+python - <<'PY'
 from diffusers import FluxPipeline
-
-print(f"✅ PyTorch: {torch.__version__}")
-print(f"✅ CUDA verfügbar: {torch.cuda.is_available()}")
-print(f"✅ GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+import torch
 
 try:
-    pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.float16)
-    print("✅ FLUX.1 Pipeline geladen!")
+    pipe = FluxPipeline.from_pretrained(
+        "black-forest-labs/FLUX.1-schnell",
+        torch_dtype=torch.float16
+    ).to("cuda")
+    print("✅ FLUX.1 erfolgreich geladen – bereit für HD-Generierungen!")
 except Exception as e:
-    print(f"⚠️  Hinweis: Modell-Download ggf. erst nach Login: {e}")
-PYCODE
+    print("❌ Fehler beim Laden:", e)
+PY
 
 echo ""
-echo "🎉 FLUX.1 Installation erfolgreich!"
-echo "➡️  Aktiviere die Umgebung mit:"
-echo "    source /workspace/flux_env/bin/activate"
+echo "🎉 Installation abgeschlossen!"
+echo "🔹 Aktiviere Umgebung mit: source /workspace/flux_env/bin/activate"
+echo "🔹 Danach kannst du image_generator_flux.py starten"
+echo "=============================================================="
