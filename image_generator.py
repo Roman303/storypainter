@@ -4,20 +4,15 @@ Stable Diffusion XL Bildgenerator - MIT STYLE aus JSON
 """
 
 import torch
-from diffusers import DiffusionPipeline
+from diffusers import DiffusionPipeline, StableDiffusionPipeline, StableDiffusionXLPipeline
 from pathlib import Path
 import json
 import time
 import argparse
 import os
-try:
-    import xformers
-    pipe.enable_xformers_memory_efficient_attention()
-    print("✅ xFormers aktiviert (Memory Efficient Attention)")
-except Exception as e:
-    print(f"⚠️ xFormers nicht aktivierbar: {e}")
-    
+
 from fx_system import apply_fx
+
 
 class AudiobookImageGenerator:
     def __init__(self, 
@@ -27,8 +22,11 @@ class AudiobookImageGenerator:
         """
         Initialisiert SDXL Pipeline
         """
-        self.global_negative_prompt = "lowres, blurry, deformed, extra limbs, text, watermark, logo, cgi, 3d render, cartoon, anime, digital art, modern photography, sharp digital edges, overprocessed, unrealistic skin, oversaturated"
-
+        self.global_negative_prompt = (
+            "lowres, blurry, deformed, extra limbs, text, watermark, logo, cgi, 3d render, "
+            "cartoon, anime, digital art, modern photography, sharp digital edges, overprocessed, "
+            "unrealistic skin, oversaturated"
+        )
 
         print(f"🎨 Lade Stable Diffusion XL...")
         
@@ -47,26 +45,42 @@ class AudiobookImageGenerator:
             self.width = 1024
             self.height = 1024
         
+        # --------------------------------------------
+        # PIPELINE-LADEN
+        # --------------------------------------------
         try:
-            # Base Pipeline
-            self.pipe = DiffusionPipeline.from_pretrained(
+            print("__ Lade Stable Diffusion XL...")
+
+            # ✅ Hauptpipeline laden
+            self.pipe = StableDiffusionXLPipeline.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16,
-                use_safetensors=True,
-                variant="fp16"
-            )
-            
-            # Memory-Optimierungen für A4000
-            self.pipe.enable_model_cpu_offload()
-            self.pipe.enable_vae_slicing()
+                variant="fp16",
+                use_safetensors=True
+            ).to("cuda")
+        
+            print("✅ Modell geladen.")
+        
+            # 🔹 xFormers aktivieren (NACHDEM self.pipe existiert)
+            try:
+                import xformers
+                self.pipe.enable_xformers_memory_efficient_attention()
+                print("✅ xFormers aktiviert (Memory Efficient Attention)")
+            except Exception as e:
+                print(f"⚠️ xFormers nicht aktivierbar: {e}")
+        
+            # 🔹 Speicheroptimierungen für VRAM
+            self.pipe.enable_vae_tiling()
             self.pipe.enable_attention_slicing()
-            
-            print("✅ SDXL Pipeline bereit!\n")
-            
+            self.pipe.enable_model_cpu_offload()
+        
         except Exception as e:
-            print(f"❌ Fehler beim Laden: {e}")
-            print("💡 Tipp: libGL Problem? Führe aus: apt install -y libgl1-mesa-glx")
-            raise
+            print(f"__ Fehler beim Laden: {e}")
+            print("__ Tipp: Wenn 'Numpy is not available', führe aus:")
+            print("         source /workspace/sdxl_env/bin/activate && pip install numpy==1.26.4")
+            raise SystemExit(1)
+
+
 
     def generate_image(self, 
                       prompt, 
