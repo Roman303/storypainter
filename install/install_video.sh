@@ -23,6 +23,10 @@ apt update && apt install -y \
 echo "🧹 Bereinige alte Video-Umgebung..."
 rm -rf /workspace/video_env
 
+pip install pydub
+sudo apt update
+sudo apt install ffmpeg
+
 # ---------------------------------------------------------------------------
 # 🐍 Neue Virtual Environment
 # ---------------------------------------------------------------------------
