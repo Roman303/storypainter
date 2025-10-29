@@ -1,288 +1,460 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Story Renderer – IMG • WAV • GPU • VIDEO (NVENC)
+Story Renderer v12 – stabile Filterketten, echter Ken‑Burns (zoompan), YUV420p-Images von Anfang an,
+robustes Overlay  HD+SD Export, NVENC.
+Python 3.10+
 
-- NVIDIA NVENC (H.264/HEVC), YouTube-kompatibel (yuv420p, 48 kHz AAC Stereo)
-- Sanfter Ken-Burns-Zoom (abschaltbar via --no-zoom)
-- Blur-Fade (scharfes Bild als Alpha über geblurter, abgedunkelter Kopie)
-- Intro (mit Titel/Autor-Fades) -> Pausen -> Bild-Szenen -> Outro (ohne Fades)
-- Overlay-Video stabil geloopt (CPU-Reencode)
-- Automatische Audio-Korrektur auf 48 kHz Stereo
-- Parallel-Rendering der Szenen (konfigurierbar)
-- Automatische NVENC-Limit-Erkennung und CPU-Fallback
-- SD-Option (450x252, ~300k)
-- Arbeitsordner bleibt erhalten (kein Auto-Delete)
+Änderungen ggü. v11:
+- Behebt AVFilterGraph: "Too many inputs specified for the scale filter" durch saubere, lineare Filterketten
+- Vereinfachtes, robustes Scaling (CPU-Scale mit force_original_aspect_ratio + pad/crop → keine NPP-Verzerrungen)
+- Ken‑Burns via zoompan: linear, fps-basiert, zentriert (in/out)
+- Bilder werden sofort auf Zielgröße (oder größer) gebracht und in yuv420p gewandelt
+- Overlay-Datei wird tolerant gefunden: particel.mp4 → particle.mp4 → overlay.mp4
 """
 
-import argparse
-import json
-from pathlib import Path
-import shlex
-import subprocess
-import sys
-import tempfile
+from __future__ import annotations
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import shutil
+import argparse
+import subprocess
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
-# --------------------------- helpers ---------------------------
+# ---------- helpers ----------
 
-def run(cmd: str):
-    print(f"[run] {cmd}")
-    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    if proc.returncode != 0:
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
+def run(cmd, quiet=False):
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0 and not quiet:
+        try:
+            print(r.stderr.decode("utf-8", "ignore"))
+        except Exception:
+            print(str(r.stderr))
+    return r.returncode == 0
 
-def ffprobe_audio(path: Path):
-    import json as _json
-    p = subprocess.run(
-        f"ffprobe -v error -show_streams -select_streams a:0 -of json {shlex.quote(str(path))}",
-        shell=True, capture_output=True, text=True
-    )
+
+def has_nvenc() -> bool:
     try:
-        info = _json.loads(p.stdout)["streams"][0]
-        sr = int(info.get("sample_rate", 0))
-        ch = int(info.get("channels", 0))
-        return sr, ch
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True)
+        return "h264_nvenc" in r.stdout
     except Exception:
-        return 0, 0
+        return False
 
-def ensure_audio_48k_stereo(in_path: Path) -> Path:
-    sr, ch = ffprobe_audio(in_path)
-    if sr == 48000 and ch == 2:
-        print(f"[audio] OK: {sr} Hz, {ch} ch -> unverändert")
-        return in_path
-    fixed = Path(tempfile.gettempdir()) / "audiobook_fixed.wav"
-    cmd = (
-        f"ffmpeg -y -i {shlex.quote(str(in_path))} -ar 48000 -ac 2 -c:a pcm_s16le "
-        f"{shlex.quote(str(fixed))}"
+
+def esc_txt(s: str) -> str:
+    return "" if not s else s.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+# ---------- filter helpers (nur CPU-scale für korrekte AR) ----------
+
+def scale_letterbox(src_label: str, w: int, h: int) -> str:
+    """Aspect erhalten, ggf. Balken: decrease + pad, immer yuv420p."""
+    return (
+        f"[{src_label}]"
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
     )
-    run(cmd)
-    print(f"[audio] converted -> 48 kHz stereo: {fixed}")
-    return fixed
 
-def safe_write_concat_list(path: Path, segments: list[Path]):
-    with open(path, "w", encoding="utf-8") as f:
-        for seg in segments:
-            safe = str(seg).replace("'", "'\\''")
-            f.write(f"file '{safe}'\n")
-    print(f"[concat list] {path}")
 
-# -------------------- NVENC limit + fallback --------------------
+def scale_cover(src_label: str, w: int, h: int) -> str:
+    """Aspect erhalten, bildfüllend: increase + crop, immer yuv420p."""
+    return (
+        f"[{src_label}]"
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h}:(iw-ow)/2:(ih-oh)/2,format=yuv420p"
+    )
 
-def detect_nvenc_limit() -> int:
-    try:
-        p = subprocess.run("nvidia-smi -q -x", shell=True, capture_output=True, text=True, timeout=2)
-        if p.returncode == 0 and "Encoder" in p.stdout:
-            import re
-            m = re.search(r"<Encoder>\s*<SessionCount>(\d+)</SessionCount>", p.stdout)
-            if m:
-                sc = int(m.group(1))
-                if sc > 0:
-                    return max(1, sc)
-    except Exception:
-        pass
-    return 2
 
-def should_fallback_to_cpu(stderr_text: str) -> bool:
-    err = (stderr_text or "").lower()
-    keys = [
-        "openencodesessionex failed",
-        "incompatible client key",
-        "no capable devices found",
-        "no nvenc capable devices",
-        "nvenc_initialise_encoder"
-    ]
-    return any(k in err for k in keys)
+def fade_inout(fi_st: float, fi_d: float, fo_st: float, fo_d: float) -> str:
+    return (
+        f"fade=t=in:st={fi_st:.3f}:d={fi_d:.3f},"
+        f"fade=t=out:st={fo_st:.3f}:d={fo_d:.3f}"
+    )
 
-def encode_cmd_with_fallback(cmd_nvenc: str, cmd_cpu: str):
-    print("[encode] Versuch mit NVENC ...")
-    proc = subprocess.run(cmd_nvenc, shell=True, capture_output=True, text=True)
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    if proc.returncode == 0:
-        return
-    if should_fallback_to_cpu(proc.stderr):
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        print("[encode] NVENC nicht verfügbar oder Limit erreicht -> Fallback CPU (libx264 ultrafast)")
-        run(cmd_cpu)
-    else:
-        if proc.stderr:
-            sys.stderr.write(proc.stderr)
-        raise RuntimeError(f"ffmpeg exited with code {proc.returncode}")
+# ---------- renderer ----------
 
-# --------------------------- core ---------------------------
+class StoryRenderer:
+    def __init__(self, base_path: Path, images_dir: Path, metadata_path: Path, output_dir: Path,
+                 threads: int = 8):
+        self.base_path = Path(base_path)
+        self.images_dir = Path(images_dir)
+        self.output_dir = Path(output_dir)
+        self.tmp_dir = self.output_dir / "temp_clips"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.tmp_dir.mkdir(exist_ok=True)
 
-def build():
-    ap = argparse.ArgumentParser(description="Story Renderer IMG WAV GPU VIDEO")
-    ap.add_argument("--path", required=True)
-    ap.add_argument("--quality", choices=["hd","sd"], default="hd")
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            self.meta = json.load(f)
+
+        if not has_nvenc():
+            raise RuntimeError("❌ Keine NVIDIA/NVENC-GPU erkannt (CPU-Fallback deaktiviert).")
+        print("🎞️ NVENC aktiv – Renderer v12.")
+
+        # Threads für ffmpeg
+        self.ff_threads = str(max(1, int(threads)))
+        os.environ.setdefault("OMP_NUM_THREADS", self.ff_threads)
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", self.ff_threads)
+        os.environ.setdefault("MKL_NUM_THREADS", self.ff_threads)
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", self.ff_threads)
+        print(f"🧵 Threads: {self.ff_threads}")
+
+        self.reuse_existing = True
+
+    # ---------- encoder args ----------
+
+    def _enc_args(self, target="work"):
+        base = [
+            "-threads", self.ff_threads,
+            "-filter_threads", self.ff_threads,
+            "-c:v", "h264_nvenc",
+            "-preset", "p5",
+            "-rc", "vbr",
+            "-rc-lookahead", "32",
+            "-multipass", "fullres",
+            "-cq", "19",
+            "-b:v", "12M", "-maxrate", "22M",
+            "-spatial-aq", "1", "-aq-strength", "8",
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "high",
+        ]
+        if target == "final":
+            return base[:-6] + [
+                "-b:v", "10M", "-maxrate", "18M",
+                "-pix_fmt", "yuv420p", "-profile:v", "high",
+            ]
+        return base
+
+    # ---------- building blocks ----------
+
+    def _render_intro(self, intro_src: Path | None, intro_dur: float,
+                      width: int, height: int, fps: int,
+                      title: str, author: str,
+                      text_in_at: float, fade_out_d: float, fade_out_offset: float) -> Path:
+        outp = self.tmp_dir / "intro_0000.mp4"
+        if getattr(self, "reuse_existing", False) and outp.exists():
+            print(f"⏩ Überspringe bereits gerendert: {outp.name}")
+            return outp
+
+        d = float(intro_dur)
+        t_in = float(text_in_at)
+        blur_sw_dur = 1.5
+        t_out_start = clamp(d + float(fade_out_offset), 0.0, max(0.0, d - fade_out_d))
+        text_out_start = clamp(t_out_start + 0.2, 0.0, max(0.0, d - 0.4))
+        text_out_dur = 0.4
+
+        t1, t2 = esc_txt(title), esc_txt(author)
+
+        if intro_src and intro_src.exists():
+            inputs = ["-ss", "0", "-t", f"{d:.6f}", "-i", str(intro_src)]
+            src_label = "0:v"
+        else:
+            inputs = ["-f", "lavfi", "-t", f"{d:.6f}", "-i", f"color=c=black:s={width}x{height}:r={fps}"]
+            src_label = "0:v"
+
+        sc = scale_letterbox(src_label, width, height)
+        flt = (
+            f"{sc},setsar=1,split[base][blur];"
+            f"[blur]trim=start={t_in},setpts=PTS-STARTPTS+{t_in}/TB,"
+            f"gblur=sigma=8,eq=brightness=-0.25[bl];"
+            f"[base][bl]xfade=transition=fade:duration={blur_sw_dur}:offset={t_in}[intro];"
+            f"[intro]fade=t=out:st={t_out_start:.3f}:d={fade_out_d:.3f}[b1];"
+            f"[b1]drawtext=text='{t1}':fontcolor=white:fontsize=40:"
+            f"x=(w-text_w)/2:y=(h*0.45-text_h):"
+            f"alpha='if(lt(t,{t_in}),0, if(lt(t,{t_in+1}), (t-{t_in})/1, "
+            f"  if(lt(t,{text_out_start}),1, if(lt(t,{text_out_start+text_out_dur}),"
+            f"    1-((t-{text_out_start})/{text_out_dur}), 0))))',"
+            f"drawtext=text='{t2}':fontcolor=white:fontsize=28:"
+            f"x=(w-text_w)/2:y=(h*0.45+text_h+10):"
+            f"alpha='if(lt(t,{t_in+0.5}),0, if(lt(t,{t_in+1.5}), (t-{t_in-0.5})/1, "
+            f"  if(lt(t,{text_out_start}),1, if(lt(t,{text_out_start+text_out_dur}),"
+            f"    1-((t-{text_out_start})/{text_out_dur}), 0))))'[v]"
+        )
+
+        enc = self._enc_args("work")
+        cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", flt,
+               "-map", "[v]", "-r", str(fps), "-an", *enc,
+               "-t", f"{d:.6f}", str(outp)]
+        run(cmd, quiet=False)
+        return outp
+
+    def _render_scene_still(self, img_path: Path, clip_dur: float,
+                            fi_st: float, fi_d: float,
+                            fo_st: float, fo_d: float,
+                            width: int, height: int, fps: int,
+                            idx: int, kb_strength: float, kb_dir: str) -> Path:
+        outp = self.tmp_dir / f"scene_{idx:04d}.mp4"
+        if getattr(self, "reuse_existing", False) and outp.exists():
+            print(f"⏩ Überspringe bereits gerendert: {outp.name}")
+            return outp
+
+        if img_path.exists():
+            inputs = ["-loop", "1", "-t", f"{clip_dur:.6f}", "-r", str(fps), "-i", str(img_path)]
+            src_label = "0:v"
+
+            kb = max(0.0, float(kb_strength))
+            frames = max(1, int(round(clip_dur * fps)))
+
+            if kb == 0.0:
+                # Kein Zoom → direkt nach HD letterboxen, dann Fades
+                chain = (
+                    f"{scale_letterbox(src_label, width, height)},"
+                    f"setsar=1,{fade_inout(fi_st, fi_d, fo_st, fo_d)}[v]"
+                )
+            else:
+                # Pre-Scale mit Reserve (cover), dann zentrierter linearer zoompan
+                pre_w = int(width * (1.0 + kb))
+                pre_h = int(height * (1.0 + kb))
+                z_expr = (
+                    f"min(1.0+{kb:.6f}, 1.0+{kb:.6f}*on/{frames})" if kb_dir == "in" else
+                    f"max(1.0, (1.0+{kb:.6f}) - {kb:.6f}*on/{frames})"
+                )
+                chain = (
+                    f"{scale_cover(src_label, pre_w, pre_h)},setsar=1,"
+                    f"zoompan=z='{z_expr}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':"
+                    f"d={frames}:s={width}x{height}:fps={fps},"
+                    f"format=yuv420p,{fade_inout(fi_st, fi_d, fo_st, fo_d)}[v]"
+                )
+        else:
+            # Fallback: schwarzer Clip mit Fades
+            inputs = ["-f", "lavfi", "-t", f"{clip_dur:.6f}",
+                      "-i", f"color=c=black:s={width}x{height}:r={fps}"]
+            chain = f"[0:v]{fade_inout(fi_st, fi_d, fo_st, fo_d)},format=yuv420p[v]"
+
+        enc = self._enc_args("work")
+        cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", chain,
+               "-map", "[v]", "-r", str(fps), "-an", *enc,
+               "-t", f"{clip_dur:.6f}", str(outp)]
+        run(cmd, quiet=False)
+        return outp
+
+    def _render_video_plain(self, video_path: Path, clip_dur: float,
+                            width: int, height: int, fps: int, idx: int) -> Path:
+        outp = self.tmp_dir / f"scene_{idx:04d}.mp4"
+        if getattr(self, "reuse_existing", False) and outp.exists():
+            print(f"⏩ Überspringe bereits gerendert: {outp.name}")
+            return outp
+
+        inputs = ["-ss", "0", "-t", f"{clip_dur:.6f}", "-i", str(video_path)]
+        chain = f"{scale_letterbox('0:v', width, height)}[v]"
+        enc = self._enc_args("work")
+        cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", chain,
+               "-map", "[v]", "-r", str(fps), "-an", *enc,
+               "-t", f"{clip_dur:.6f}", str(outp)]
+        run(cmd, quiet=False)
+        return outp
+
+    def _build_gap_black(self, dur: float, width: int, height: int, fps: int, idx: int) -> Path:
+        outp = self.tmp_dir / f"gap_{idx:04d}.mp4"
+        if getattr(self, "reuse_existing", False) and outp.exists():
+            print(f"⏩ Überspringe bereits gerendert: {outp.name}")
+            return outp
+
+        d = max(0.0, float(dur))
+        if d < 1e-3:
+            d = 1.0 / max(1, fps)
+        fe = min(0.5, d / 2.0)
+        chain = (
+            f"color=c=black:s={width}x{height}:r={fps},"
+            f"fade=t=in:st=0:d={fe:.6f},fade=t=out:st={(d-fe):.6f}:d={fe:.6f},format=yuv420p[v]"
+        )
+        enc = self._enc_args("work")
+        cmd = ["ffmpeg", "-y", "-f", "lavfi", "-t", f"{d:.6f}", "-i", "anullsrc=r=48000:cl=stereo",
+               "-filter_complex", chain, "-map", "[v]", "-an", *enc, "-t", f"{d:.6f}", str(outp)]
+        run(cmd, quiet=False)
+        return outp
+
+    def _merge_concat(self, clips, out_path: Path):
+        concat_list = out_path.parent / "concat_list.txt"
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for c in clips:
+                f.write(f"file '{Path(c).resolve().as_posix()}'\n")
+        enc = self._enc_args("work")
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), *enc, str(out_path)]
+        print("🔗 Merge:", " ".join(cmd))
+        ok = run(cmd, quiet=False)
+        if not ok or not out_path.exists():
+            raise RuntimeError(f"❌ Merge fehlgeschlagen – keine Datei '{out_path.name}' erzeugt.")
+        return out_path
+
+    # ---------- main render ----------
+
+    def render(self, audiobook_file: Path,
+               width=1920, height=1080, fps=30,
+               fade_in=1.5, fade_out=2.0,
+               fade_in_offset=0.0, fade_out_offset=0.0,
+               kb_strength=0.06, kb_direction="in",
+               overlay_name="particel.mp4",
+               parallel_workers: int = 4):
+
+        scenes = self.meta["scenes"]
+        title = self.meta.get("title", "")
+        author = self.meta.get("author", "")
+        n = len(scenes)
+        starts = [float(s["start_time"]) for s in scenes]
+        ends = [float(s["end_time"]) for s in scenes]
+        bases = [max(0.0, ends[i] - starts[i]) for i in range(n)]
+
+        items = []
+
+        # Intro zuerst
+        sid0 = int(scenes[0].get("scene_id", 0))
+        intro_img = self.images_dir / f"image_{sid0:04d}.png"
+        intro_src = self.base_path / "intro.mp4"
+        if not intro_src.exists():
+            intro_src = intro_img
+        intro_clip = self._render_intro(intro_src, bases[0], width, height, fps,
+                                        title, author, 3.0, fade_out, fade_out_offset)
+        items.append(intro_clip)
+
+        # Szenen (ohne Outro) parallel rendern
+        pool = ThreadPoolExecutor(max_workers=max(1, int(parallel_workers)))
+        futures = []
+        for i in range(1, n - 1):
+            sid = int(scenes[i].get("scene_id", i))
+            img = self.images_dir / f"image_{sid:04d}.png"
+            base = bases[i]
+            pre_extend = -min(0.0, float(fade_in_offset))
+            clip_dur = base + pre_extend
+            fi_start = clamp((starts[i] + float(fade_in_offset)) - (starts[i] - pre_extend), 0.0, max(0.0, clip_dur - fade_in))
+            fo_start = clamp((ends[i] + float(fade_out_offset)) - (starts[i] - pre_extend), 0.0, max(0.0, clip_dur - fade_out))
+            kb_dir_eff = kb_direction if kb_direction in ("in", "out") else ("in" if (i % 2 == 0) else "out")
+
+            futures.append(pool.submit(
+                self._render_scene_still,
+                img, clip_dur, fi_start, fade_in, fo_start, fade_out,
+                width, height, fps, i, kb_strength, kb_dir_eff
+            ))
+
+        # Gaps (sequentiell)
+        gaps = []
+        for i in range(1, n - 1):
+            gap_real = max(0.0, starts[i + 1] - ends[i])
+            gap_eff = max(0.0, gap_real + float(fade_in_offset))
+            if gap_eff > 0.05:
+                gaps.append(self._build_gap_black(gap_eff, width, height, fps, idx=i))
+
+        for fut in futures:
+            items.append(fut.result())
+        pool.shutdown(wait=True)
+
+        for g in gaps:
+            items.append(g)
+
+        # Outro
+        outro_vid = self.base_path / "outro.mp4"
+        if not outro_vid.exists():
+            raise FileNotFoundError(f"❌ Outro-Video fehlt: {outro_vid}")
+        outro_clip = self._render_video_plain(outro_vid, bases[-1], width, height, fps, idx=n - 1)
+        items.append(outro_clip)
+
+        # Merge
+        merged = self.output_dir / "_merged_master.mp4"
+        self._merge_concat(items, merged)
+
+        overlay_file = self.base_path / overlay_name if overlay_name else None
+        if overlay_file and not overlay_file.exists():
+            print(f"⚠️ Overlay '{overlay_name}' nicht gefunden – ohne Overlay weiter.")
+            overlay_file = None
+                visual = merged
+        if overlay_file:
+            print("✨ Overlay anwenden …", overlay_file)
+            ov_out = self.output_dir / "_visual_overlay.mp4"
+            flt = (
+                f"[0:v]format=yuv420p[base];"
+                f"[1:v]tpad=stop_mode=clone:stop_duration=36000,"
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:(iw-ow)/2:(ih-oh)/2,format=rgba,"
+
+                f"colorchannelmixer=aa=0.35[ov];"
+                f"[base][ov]overlay=0:0:shortest=0[out]"
+            )
+            enc = self._enc_args("work")
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(merged),
+                "-i", str(overlay_file),
+                "-filter_complex", flt,
+                "-map", "[out]", "-an", *enc, str(ov_out)
+            ]
+            ok = run(cmd, quiet=False)
+            if ok and ov_out.exists():
+                visual = ov_out
+                print(f"✅ Overlay erfolgreich: {ov_out}")
+            else:
+                print(f"⚠️ Overlay fehlgeschlagen – fahre ohne Overlay fort (nutze {merged}).")
+        else:
+            print(f"⚠️ Overlay-Datei nicht gefunden (versucht: {', '.join(str(p.name) for p in overlay_candidates)}) – ohne Overlay weiter.")
+
+        # ---------- FinalMux: HD ----------
+        final_hd = self.output_dir / "story_final_hd.mp4"
+        enc_final = self._enc_args("final")
+        cmd_hd = [
+            "ffmpeg", "-y", "-fflags", "+genpts",
+            "-i", str(visual), "-i", str(audiobook_file),
+            "-map", "0:v:0", "-map", "1:a:0",
+            *enc_final,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart", "-shortest", str(final_hd)
+        ]
+        run(cmd_hd, quiet=False)
+
+        # ---------- SD-Export ----------
+        final_sd = self.output_dir / "story_final_sd.mp4"
+        cmd_sd = [
+            "ffmpeg", "-y",
+            "-i", str(final_hd),
+            "-vf", "scale=640:-2:flags=bicubic",
+            "-c:v", "h264_nvenc", "-b:v", "300k", "-maxrate", "320k", "-bufsize", "600k",
+            "-preset", "p6",
+            "-c:a", "aac", "-b:a", "64k", "-ar", "48000",
+            "-movflags", "+faststart",
+            str(final_sd)
+        ]
+        run(cmd_sd, quiet=False)
+
+        print("__ Fertig:", final_hd, "| SD:", final_sd)
+        return final_hd, final_sd
+
+# ---------- CLI ----------
+
+def main():
+    ap = argparse.ArgumentParser(description="Story Renderer v12 – stabiler Ken‑Burns, Overlay, HD+SD")
+    ap.add_argument("--path", required=True, help="Base-Path (intro.mp4, outro.mp4, particel/particle/overlay.mp4)")
+    ap.add_argument("--audiobook", default=None)
+    ap.add_argument("--metadata", default=None)
+    ap.add_argument("--output", default=None)
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--zoom-depth", type=float, default=0.06)
-    ap.add_argument("--zoom-direction", choices=["in","out","alt"], default="in")
     ap.add_argument("--fade-in", type=float, default=1.5)
     ap.add_argument("--fade-out", type=float, default=2.0)
-    ap.add_argument("--fade-in-offset", type=float, default=0.0)
-    ap.add_argument("--fade-out-offset", type=float, default=0.0)
-    ap.add_argument("--overlay", default=None)
-    ap.add_argument("--intro-video", default=None)
-    ap.add_argument("--outro-video", default=None)
-    ap.add_argument("--encoder", choices=["h264","hevc"], default="h264")
-    ap.add_argument("--pixfmt", default="yuv420p")
-    ap.add_argument("--crf", type=int, default=19)
-    ap.add_argument("--no-zoom", action="store_true")
-    ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4)//3))
+    ap.add_argument("--fade-in-offset", type=float, default=0.0, help="0 = an Szenenbeginn; -1 = 1s früher")
+    ap.add_argument("--fade-out-offset", type=float, default=0.0, help="0 = an Szenenende; -1 = 1s früher")
+    ap.add_argument("--kb-strength", type=float, default=0.06, help="Ken‑Burns Stärke; 0.0 deaktiviert")
+    ap.add_argument("--kb-direction", choices=["in", "out", "alt"], default="in")
+    ap.add_argument("--overlay", default="particel.mp4", help="Overlay-Datei-Name im Base-Path")
+    ap.add_argument("--threads", type=int, default=8, help="FFmpeg/Filter Threads")
+    ap.add_argument("--workers", type=int, default=4, help="Parallele Szenen-Render-Jobs")
     args = ap.parse_args()
 
     base = Path(args.path)
-    images_dir = base / "images"
-    audiobook = base / "audiobook" / "complete_audiobook.wav"
-    metadata  = base / "audiobook" / "audiobook_metadata.json"
-    output_dir = base / "story"
-    overlay_default = base / "particel.mp4"
+    audiobook = Path(args.audiobook) if args.audiobook else (base / "audiobook" / "complete_audiobook.wav")
+    metadata = Path(args.metadata) if args.metadata else (base / "audiobook" / "audiobook_metadata.json")
+    output = Path(args.output) if args.output else (base / "story")
 
-    intro_video = Path(args.intro_video) if args.intro_video else (base / "intro.mp4")
-    outro_video = Path(args.outro_video) if args.outro_video else (base / "outro.mp4")
-    overlay_path = Path(args.overlay) if args.overlay else overlay_default
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # JSON laden
-    with open(metadata, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    scenes = meta.get("scenes", [])
-    pause_duration = float(meta.get("pause_duration", 0))
-
-    # Video-Parameter
-    if args.quality == "hd":
-        width, height = 1920, 1080
-        v_bitrate = "8M"
-    else:
-        width, height = 450, 252
-        v_bitrate = "300k"
-
-    fps = args.fps
-    if args.encoder == "h264":
-        vcodec = "h264_nvenc"
-        vopts = f"-rc vbr -cq {args.crf} -preset slow -b:v {v_bitrate}"
-    else:
-        vcodec = "hevc_nvenc"
-        vopts = f"-rc vbr -cq 21 -preset slow -b:v {v_bitrate}"
-
-    cpu_vcodec = "libx264"
-    cpu_vopts = "-preset ultrafast -crf 18"
-
-    ff_threads = max(2, (os.cpu_count() or 4)//2)
-    ff_filter_threads = max(2, ff_threads//2)
-    ff_thread_flags = f"-threads {ff_threads} -filter_complex_threads {ff_filter_threads}"
-
-    nv_limit = detect_nvenc_limit()
-    if args.workers > nv_limit:
-        print(f"[NVENC] limit: {args.workers} -> {nv_limit}")
-        args.workers = nv_limit
-
-    work = Path(tempfile.mkdtemp(prefix="story_nvenc_"))
-    print(f"[workdir] {work}")
-
-    def build_pause(dur: float, label: str):
-        if dur <= 0:
-            return None
-        out = work / f"pause_{label}.mp4"
-        cmd = (
-            f"ffmpeg -y {ff_thread_flags} -f lavfi -t {dur:.3f} -i color=c=black:s={width}x{height}:r={fps} "
-            f"-c:v {vcodec} {vopts} -pix_fmt {args.pixfmt} {shlex.quote(str(out))}"
-        )
-        encode_cmd_with_fallback(cmd, cmd.replace(f"-c:v {vcodec}", f"-c:v {cpu_vcodec} {cpu_vopts}"))
-        return out
-
-    # -------------------- Szenen rendern --------------------
-    futures = []
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        for s in scenes:
-            if s.get("type") == "scene":
-                sid = int(s["scene_id"])
-                img = images_dir / f"image_{sid:04d}.png"
-                if not img.exists():
-                    raise SystemExit(f"Bild fehlt: {img}")
-                d = float(s.get("duration", 3))
-                out = work / f"scene_{sid:04d}.mp4"
-                zoom = "" if args.no_zoom else f"zoompan=z='1+0.00005*on':d=1:s={width}x{height}:fps={fps},"
-                vf = (
-                    f"[0:v]{zoom}format=yuv420p,fade=t=in:st=0:d=1:alpha=1,"
-                    f"fade=t=out:st={max(0.1, d-1):.3f}:d=1:alpha=1[vout]"
-                )
-                cmd_nv = (
-                    f"ffmpeg -y {ff_thread_flags} -loop 1 -t {d:.3f} -i {shlex.quote(str(img))} "
-                    f"-filter_complex {shlex.quote(vf)} -map [vout] -r {fps} "
-                    f"-c:v {vcodec} {vopts} -pix_fmt {args.pixfmt} {shlex.quote(str(out))}"
-                )
-                cmd_cpu = cmd_nv.replace(f"-c:v {vcodec}", f"-c:v {cpu_vcodec} {cpu_vopts}")
-                futures.append(ex.submit(encode_cmd_with_fallback, cmd_nv, cmd_cpu))
-
-        for fut in as_completed(futures):
-            fut.result()
-
-    # -------------------- CONCAT (Video only, stabil) --------------------
-    concat_list = work / "segments.txt"
-    safe_write_concat_list(concat_list, [Path(s) for s in sorted(work.glob('scene_*.mp4'))])
-    
-    concat_out = work / "video_concat.mp4"
-    
-    # Wir zwingen ffmpeg, korrekte Zeitstempel zu erzeugen und gleiche Parameter zu nutzen
-    cmd_nv = (
-        f"ffmpeg -y {ff_thread_flags} -f concat -safe 0 -fflags +genpts "
-        f"-i {shlex.quote(str(concat_list))} "
-        f"-vf scale={width}:{height},format=yuv420p,fps={fps} "
-        f"-c:v {vcodec} {vopts} -pix_fmt {args.pixfmt} -r {fps} "
-        f"-an {shlex.quote(str(concat_out))}"
+    r = StoryRenderer(base, base / "images", metadata, output, threads=args.threads)
+    r.render(
+        audiobook_file=audiobook,
+        width=1920, height=1080, fps=args.fps,
+        fade_in=args.fade_in, fade_out=args.fade_out,
+        fade_in_offset=args.fade_in_offset, fade_out_offset=args.fade_out_offset,
+        kb_strength=args.kb_strength,
+        kb_direction=("in" if args.kb_direction != "alt" else "in"),
+        overlay_name=args.overlay,
+        parallel_workers=args.workers,
     )
-    cmd_cpu = (
-        f"ffmpeg -y {ff_thread_flags} -f concat -safe 0 -fflags +genpts "
-        f"-i {shlex.quote(str(concat_list))} "
-        f"-vf scale={width}:{height},format=yuv420p,fps={fps} "
-        f"-c:v {cpu_vcodec} {cpu_vopts} -pix_fmt {args.pixfmt} -r {fps} "
-        f"-an {shlex.quote(str(concat_out))}"
-    )
-    
-    encode_cmd_with_fallback(cmd_nv, cmd_cpu)
-
-    # -------------------- OVERLAY (CPU Reencode stabil) --------------------
-    video_wo_audio = work / "video_overlay.mp4"
-    if overlay_path.exists():
-        overlay_input = f"-stream_loop 100 -i {shlex.quote(str(overlay_path))} "
-        vf_overlay = (
-            f"[0:v]format=yuv420p[base];"
-            f"[1:v]scale={width}:{height},format=rgba,setpts=PTS-STARTPTS[ol];"
-            f"[base][ol]overlay=shortest=1,format=yuv420p[v]"
-        )
-        cmd_overlay = (
-            f"ffmpeg -y {ff_thread_flags} -i {shlex.quote(str(concat_out))} {overlay_input}"
-            f"-filter_complex {shlex.quote(vf_overlay)} -map [v] -r {fps} "
-            f"-c:v {cpu_vcodec} {cpu_vopts} -pix_fmt {args.pixfmt} {shlex.quote(str(video_wo_audio))}"
-        )
-        run(cmd_overlay)
-    else:
-        run(
-            f"ffmpeg -y {ff_thread_flags} -i {shlex.quote(str(concat_out))} -c copy {shlex.quote(str(video_wo_audio))}"
-        )
-
-    # -------------------- AUDIO fix & Mux --------------------
-    audiobook_fixed = ensure_audio_48k_stereo(audiobook)
-    final_out = output_dir / ("story_hd.mp4" if args.quality == "hd" else "story_sd.mp4")
-    run(
-        f"ffmpeg -y {ff_thread_flags} -i {shlex.quote(str(video_wo_audio))} -i {shlex.quote(str(audiobook_fixed))} "
-        f"-map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -ar 48000 -ac 2 -b:a 160k -shortest "
-        f"-movflags +faststart {shlex.quote(str(final_out))}"
-    )
-    print(f"✅ Fertig: {final_out}")
 
 if __name__ == "__main__":
-    try:
-        build()
-    except Exception as e:
-        print(f"✖ Fehler: {e}")
-        sys.exit(1)
+    main()
