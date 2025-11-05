@@ -137,8 +137,6 @@ class StoryRenderer:
         else:
             return scene["start_time"] - half_pause, scene["end_time"] + half_pause
     
-    
-        
     def _is_image(self, path):
         """Check if file is an image (not used anymore - always PNG)."""
         return True
@@ -156,99 +154,143 @@ class StoryRenderer:
         else:
             return self.images / f"image_{sid:04d}.png"
 
-    
+    def _get_duration(self, file):
+        """Get media duration in seconds."""
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(file)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return float(result.stdout.strip())
+
     def render_unit(self, scene):
         """
         Render a single scene clip with proper timing and effects.
         """
         sid = scene['scene_id']
         stype = scene['type']
-        clip_start, clip_end = self._get_clip_times(scene)
-        clip_dur = clip_end - clip_start
 
-        #SPECIAL HACK todo
-        if scene["scene_id"] == 1:
-            clip_end += 2.0
-            clip_dur = clip_end - clip_start
-            print("🕒 Scene 1 extended by 2s for test")
-                
-        out_file = self.tmp / f"scene_{sid:04d}.mp4"
-        
-        # Find source file
+        # Quelle zuerst finden (brauchen wir u.a. für Intro-Dauer)
         src = self._find_source(scene)
-        
         if not src or not src.exists():
             print(f"❌ Scene {sid} ({stype}): File not found: {src}")
             return None
+
+        # Clip-Zeiten laut Timeline (für Szenen / Fades usw.)
+        clip_start, clip_end = self._get_clip_times(scene)
+        clip_dur = clip_end - clip_start
+
+        # Intro: echte Videolänge + 2s Auslauf (bei Videoquelle)
+        video_exts = ['.mp4', '.mov', '.mkv', '.avi', '.mpg', '.mpeg']
+        if stype == 'intro':
+            if src.suffix.lower() in video_exts:
+                real_dur = self._get_duration(src)
+                tail = 2.0
+                clip_dur = real_dur + tail
+                print(f"✨ Intro uses full source length ({real_dur:.2f}s) + {tail:.2f}s tail → {clip_dur:.2f}s total")
+            else:
+                # Intro-Bild: einfach +2s auf geplante Dauer
+                tail = 2.0
+                clip_dur = clip_dur + tail
+                print(f"✨ Intro (image) extended by {tail:.2f}s → {clip_dur:.2f}s total")
+
+        out_file = self.tmp / f"scene_{sid:04d}.mp4"
         
         print(f"📂 Scene {sid} ({stype}): {src.name} → {clip_dur:.2f}s")
-        
-        is_img = True  # Always PNG images
         
         # ───────────────────────────────────────────────────────────────────────
         # Build filter chain
         # ───────────────────────────────────────────────────────────────────────
-        
-        filters = []
 
+        filters = []
         is_img = src.suffix.lower() in ['.png', '.jpg', '.jpeg']
-        
+
         if is_img:
-            # Statisches Bild → Ken Burns Zoom
-            zoom_expr = ken_burns_expr(
-                clip_dur,
-                strength=self.args.kb_strength,
-                direction=self.args.kb_direction,
-                ease=self.args.kb_ease,
-                fps=self.args.fps
-            )
-            filters.append(
-                f"scale={RES_HD[0]}:{RES_HD[1]}:force_original_aspect_ratio=increase,"
-                f"crop={RES_HD[0]}:{RES_HD[1]},"
-                f"setsar=1,"
-                f"zoompan=z={zoom_expr}:d={int(clip_dur * self.args.fps)}:s={RES_HD[0]}x{RES_HD[1]}:fps={self.args.fps}"
-            )
+            if self.args.kb_strength == 0:
+                # Kein Ken Burns → Nur skalieren, viel schneller!
+                filters.append(
+                    f"scale={RES_HD[0]}:{RES_HD[1]}:force_original_aspect_ratio=increase,"
+                    f"crop={RES_HD[0]}:{RES_HD[1]},setsar=1,fps={self.args.fps}"
+                )
+                print(f"⚡ Scene {sid}: Fast render mode (no zoom)")
+            else:
+                zoom_expr = ken_burns_expr(
+                    clip_dur,
+                    strength=self.args.kb_strength,
+                    direction=self.args.kb_direction,
+                    ease=self.args.kb_ease,
+                    fps=self.args.fps
+                )
+                filters.append(
+                    f"scale={RES_HD[0]}:{RES_HD[1]}:force_original_aspect_ratio=increase,"
+                    f"crop={RES_HD[0]}:{RES_HD[1]},"
+                    f"setsar=1,"
+                    f"zoompan=z={zoom_expr}:d={int(clip_dur * self.args.fps)}:s={RES_HD[0]}x{RES_HD[1]}:fps={self.args.fps}"
+                )
         else:
-            # Video → nur skalieren
-            filters.append(
+            # Videoquelle
+            base_filter = (
                 f"scale={RES_HD[0]}:{RES_HD[1]}:force_original_aspect_ratio=increase,"
                 f"crop={RES_HD[0]}:{RES_HD[1]},setsar=1,fps={self.args.fps}"
             )
+            if stype == 'intro':
+                # tpad an erste Stelle für sicheres Anhängen
+                base_filter = f"tpad=stop_mode=clone:stop_duration=2,{base_filter}"
+                print("⏩ Intro video will be extended by +2s via tpad filter.")
+            filters.append(base_filter)
 
-        
-        # HyperTrail (motion blur)
-        if self.hypertrail:
+        # HyperTrail (nur fürs Intro)
+        if self.hypertrail and stype == 'intro':
             filters.append("tmix=frames=60:weights='1 1 1 1 1'")
-        
-        # Vignette for scenes (not intro/outro)
+
+        # Vignette nur für Szenen
         if stype == 'scene' and self.vignette:
             filters.append(
                 "split[vb1][vb2];"
                 "[vb2]vignette=angle=0:mode=forward:eval=frame,eq=brightness=-0.20,gblur=sigma=8[vbmask];"
                 "[vb1][vbmask]blend=all_expr='A*(1-0.25)+B*0.25'"
             )
-        
-        # Fade effects
+
+        # Fades
         fade_in_start = self.args.fade_in_offset
         fade_out_start = clip_dur - self.args.fade_out + self.args.fade_out_offset
-        
+
         if stype == 'intro':
-            # Intro: no fade-in, only fade-out
             filters.append(f"fade=t=out:st={fade_out_start}:d={self.args.fade_out}")
         elif stype == 'outro':
-            # Outro: fade-in, fade-out at end
             filters.append(f"fade=t=in:st={fade_in_start}:d={self.args.fade_in}")
             filters.append(f"fade=t=out:st={fade_out_start}:d={self.args.fade_out}")
         else:
-            # Scene: both fades
             filters.append(f"fade=t=in:st={fade_in_start}:d={self.args.fade_in}")
             filters.append(f"fade=t=out:st={fade_out_start}:d={self.args.fade_out}")
 
-        
-        # Format
         filters.append("format=yuv420p")
-        
         filter_chain = ",".join(filters)
+
+        # ───────────────────────────────────────────────────────────────────────
+        # FFmpeg command
+        # ───────────────────────────────────────────────────────────────────────
+        cmd = ['ffmpeg', '-y']
+
+        if is_img:
+            cmd += ['-loop', '1']
+
+        cmd += ['-i', str(src)]
+
+        # kein -t, FFmpeg rendert mit tpad automatisch länger
+        cmd += [
+            '-vf', filter_chain,
+            '-r', str(self.args.fps),
+            '-threads', str(self.args.threads),
+            *self._enc(),
+            '-an',
+            str(out_file)
+        ]
+
+        print(f"   Rendering {clip_dur:.2f}s (approx, tpad extends beyond source)...")
+
         
         # ───────────────────────────────────────────────────────────────────────
         # Text overlay for intro
@@ -258,16 +300,17 @@ class StoryRenderer:
             title = self.meta.get('title', 'Untitled').replace("'", "\\'").replace(":", "\\:")
             author = self.meta.get('author', 'Unknown').replace("'", "\\'").replace(":", "\\:")
         
-            fade_in_start = 2      # Sekunde, wann Text erscheinen soll
-            fade_in_dur   = 1.5     # Dauer des Einblendens
-            fade_out_start = 9     # Sekunde, wann Text ausblenden soll
-            fade_out_dur   = 1     # Dauer des Ausblendens
+            txt_fade_in_start = 2      # Sekunde, wann Text erscheinen soll
+            txt_fade_in_dur   = 1.5    # Dauer des Einblendens
+            txt_fade_out_start = 9     # Sekunde, wann Text ausblenden soll
+            txt_fade_out_dur   = 1     # Dauer des Ausblendens
         
             alpha_expr = (
-                f"if(lt(t,{fade_in_start}),0,"
-                f"if(lt(t,{fade_in_start + fade_in_dur}),(t-{fade_in_start})/{fade_in_dur},"
-                f"if(lt(t,{fade_out_start}),1,"
-                f"if(lt(t,{fade_out_start + fade_out_dur}),1-(t-{fade_out_start})/{fade_out_dur},0))))"
+                f"if(lt(t,{txt_fade_in_start}),0,"
+                f"if(lt(t,{txt_fade_in_start + txt_fade_in_dur}),(t-{txt_fade_in_start})/{txt_fade_in_dur},"
+                f"if(lt(t,{txt_fade_out_start}),1,"
+                f"if(lt(t,{txt_fade_out_start + txt_fade_out_dur}),"
+                f"1-(t-{txt_fade_out_start})/{txt_fade_out_dur},0))))"
             )
         
             filter_chain += (
@@ -279,8 +322,6 @@ class StoryRenderer:
                 f"x=(w-text_w)/2:y=(h-text_h)/2+60:shadowcolor=black:shadowx=2:shadowy=2"
             )
             
-        
-        
         # ───────────────────────────────────────────────────────────────────────
         # FFmpeg command
         # ───────────────────────────────────────────────────────────────────────
@@ -288,18 +329,31 @@ class StoryRenderer:
         cmd = ['ffmpeg', '-y']
 
         # Nur bei Bildern -loop 1 setzen
-        if src.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+        if is_img:
             cmd += ['-loop', '1']
         
-        cmd += [
-            '-i', str(src),
-            '-vf', filter_chain,
-            '-t', str(clip_dur),
-            '-r', str(self.args.fps),
-            *self._enc(),
-            '-an',
-            str(out_file)
-        ]
+        cmd += ['-i', str(src)]
+        
+        # Wenn Intro mit tpad (Videoquelle), dann kein -t, sonst ffmpeg schneidet!
+        if stype == 'intro' and src.suffix.lower() in ['.mp4', '.mov', '.mkv', '.avi', '.mpg', '.mpeg']:
+            cmd += [
+                '-vf', filter_chain,
+                '-r', str(self.args.fps),
+                '-threads', str(self.args.threads),
+                *self._enc(),
+                '-an',
+                str(out_file)
+            ]
+        else:
+            cmd += [
+                '-vf', filter_chain,
+                '-t', str(clip_dur),
+                '-r', str(self.args.fps),
+                '-threads', str(self.args.threads),
+                *self._enc(),
+                '-an',
+                str(out_file)
+            ]
 
         
         print(f"   Rendering {clip_dur:.2f}s...")
@@ -386,6 +440,7 @@ class StoryRenderer:
             '-i', str(video),
             '-i', str(self.audio),
             '-vf', f"tpad=stop_mode=clone:stop_duration={diff}",
+            '-threads', str(self.args.threads),
             *self._enc(),
             '-c:a', 'aac',
             '-b:a', '192k',
@@ -412,6 +467,7 @@ class StoryRenderer:
             '-i', str(hd_video),
             '-vf', f"scale={RES_SD[0]}:{RES_SD[1]}:force_original_aspect_ratio=decrease,"
                    f"pad={RES_SD[0]}:{RES_SD[1]}:(ow-iw)/2:(oh-ih)/2",
+            '-threads', str(self.args.threads),
             '-c:v', 'h264_nvenc',
             '-preset', 'p5',
             '-b:v', '300k',
@@ -423,17 +479,6 @@ class StoryRenderer:
         
         subprocess.run(cmd, check=True)
         print(f"✅ SD video: {sd_video}")
-    
-    def _get_duration(self, file):
-        """Get media duration in seconds."""
-        cmd = [
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            str(file)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return float(result.stdout.strip())
     
     def render_all(self):
         """
@@ -480,11 +525,11 @@ def main():
     ap.add_argument('--fade-out', type=float, default=2.0, help='Fade-out duration (s)')
     ap.add_argument('--fade-in-offset', type=float, default=1.0, help='Fade-in offset (s)')
     ap.add_argument('--fade-out-offset', type=float, default=0.0, help='Fade-out offset (s)')
-    ap.add_argument('--kb-strength', type=float, default=0.06, help='Ken Burns zoom strength')
+    ap.add_argument('--kb-strength', type=float, default=0.0, help='Ken Burns zoom strength')
     ap.add_argument('--kb-direction', choices=['in','out'], default='in', help='Ken Burns direction')
     ap.add_argument('--kb-ease', action='store_true', help='Ken Burns ease-out')
-    ap.add_argument('--threads', type=int, default=8, help='FFmpeg threads')
-    ap.add_argument('--workers', type=int, default=4, help='Parallel workers')
+    ap.add_argument('--threads', type=int, default=4, help='FFmpeg threads')
+    ap.add_argument('--workers', type=int, default=2, help='Parallel workers')
     ap.add_argument('--no-hypertrail', action='store_true', help='Disable HyperTrail (tmix)')
     ap.add_argument('--no-vignette', action='store_true', help='Disable soft vignette')
     
@@ -492,7 +537,7 @@ def main():
     
     base = Path(args.path)
     audio = Path(args.audiobook) if args.audiobook else base / 'master.wav'
-    meta = Path(args.metadata) if args.metadata else base / 'audiobook' / 'audiobook_metadata_test.json'
+    meta = Path(args.metadata) if args.metadata else base / 'audiobook' / 'audiobook_metadata.json'
     out = Path(args.output) if args.output else base / 'story'
     
     renderer = StoryRenderer(base, audio, meta, out, args)
