@@ -148,14 +148,14 @@ class VoiceGeneratorXTTS:
         # ---- Modell initialisieren ----
         tts = Xtts.init_from_config(cfg)
     
-        # ---- Checkpoint laden ----
+        # ---- Checkpoint laden (optional, falls vorhanden) ----
         checkpoint_dir = str(Path(self.cfg.model_path).parent)
     
         print("🎤 Lade Sprecher-Embedding …")
         self.speaker_latents = None
         if self.cfg.speaker_wav:
-            lat = self.tts.get_conditioning_latents(audio_path=str(self.cfg.speaker_wav))
-            # 🔧 Kompatibilität: Coqui-Versionen geben Dict ODER Tuple zurück
+            lat = tts.get_conditioning_latents(audio_path=str(self.cfg.speaker_wav))
+            # 🔧 Kompatibilität prüfen
             if isinstance(lat, dict):
                 self.speaker_latents = {
                     "gpt_cond_latent": lat.get("gpt_cond_latent"),
@@ -175,9 +175,10 @@ class VoiceGeneratorXTTS:
                 "gpt_cond_latent": None,
                 "speaker_embedding": None,
             }
-
     
+        # 👉 Hier erst zurückgeben!
         return tts
+
 
     def _detect_output_rate(self) -> int:
         # XTTS hat audio_config.output_sample_rate; fallback auf erwarteten Wert
@@ -383,9 +384,9 @@ def main():
     # --- CONFIG ---
     CONFIG = {
         # Stimmen / Modell (bleibt unverändert)
-        "model_path": "/workspace/voices/franziska300/model.pth",
-        "config_path": "/workspace/voices/franziska300/config.json",
-        "speaker_wav": "/workspace/voices/franziska300/dataset/wavs/die-faelle-des-prof-machata_00000141.wav",
+        "model_path": "/workspace/storypainter/voices/franziska300/model.pth",
+        "config_path": "/workspace/storypainter/voices/franziska300/config.json",
+        "speaker_wav": "/workspace/storypainter/voices/franziska300/dataset/wavs/speaker_24k.wav",
 
         # Eingabe / Ausgabe (werden dynamisch kombiniert)
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
@@ -411,7 +412,21 @@ def main():
     for k, v in CONFIG.items():
         print(f"{k:15}: {v}")
 
+    cfg = Config(
+        model_path=Path(CONFIG["model_path"]),
+        config_path=Path(CONFIG["config_path"]),
+        speaker_wav=Path(CONFIG["speaker_wav"]),
+        scenes_file=Path(CONFIG["scenes_file"]),
+        output_dir=Path(CONFIG["output_dir"]),
+        progress_file=Path(CONFIG["progress_file"]),
+        language=CONFIG["language"],
+        max_chunk_length=CONFIG["max_chunk_length"],
+        temperature=CONFIG["temperature"],
+        repetition_penalty=CONFIG["repetition_penalty"],
+        expected_rate=CONFIG["expected_rate"],
+    )
     gen = VoiceGeneratorXTTS(cfg)
+
     ok = gen.run()
     if not ok:
         # Non-zero exit wäre auch möglich; wir lassen informative Ausgabe stehen.
