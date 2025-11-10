@@ -335,9 +335,9 @@ def main():
     # --- CONFIG ---
     CONFIG = {
         # Stimmen / Modell (bleibt unverändert)
-        "model_path": "/workspace/storypainter/voices/franziska300",
-        "config_path": "/workspace/storypainter/voices/franziska300/config.json",
-        "speaker_wav": "/workspace/storypainter/voices/franziska300/dataset/wavs/die-faelle-des-prof-machata_00000141.wav",
+        "model_path": "/workspace/storypainter/voices/tom",
+        "config_path": "/workspace/storypainter/voices/tom/config.json",
+        "speaker_wav": "/workspace/storypainter/voices/tom/norma.wav",
 
         # Eingabe / Ausgabe (werden dynamisch kombiniert)
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
