@@ -164,12 +164,12 @@ class AudiobookImageGenerator:
             prompt = scene.get("image_prompt", "")
             scene_negative = scene.get("negative_prompt", "")
             # kombiniere globalen und szenenspezifischen Negativprompt
-            negative = f"{self.global_negative_prompt}, {scene_negative}".strip(", ")
+            negative = f"{scene_negative}".strip(", ")
 
             
             # ✅ STYLE ZUM PROMPT HINZUFÜGEN
             if style and style.lower() not in prompt.lower():
-                enhanced_prompt = f"{prompt},{style}"
+                enhanced_prompt = f"{style},{prompt}"
                 print(f"   🎨 Style hinzugefügt: {style[:50]}...")
             else:
                 enhanced_prompt = prompt

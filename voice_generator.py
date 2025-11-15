@@ -335,9 +335,9 @@ def main():
     # --- CONFIG ---
     CONFIG = {
         # Stimmen / Modell (bleibt unverändert)
-        "model_path": "/workspace/storypainter/voices/tom",
-        "config_path": "/workspace/storypainter/voices/tom/config.json",
-        "speaker_wav": "/workspace/storypainter/voices/tom/norma.wav",
+        "model_path": "/workspace/storypainter/voices/tomhq",
+        "config_path": "/workspace/storypainter/voices/tomhq/config.json",
+        "speaker_wav": "/workspace/storypainter/voices/tomhq/norma.wav",
 
         # Eingabe / Ausgabe (werden dynamisch kombiniert)
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
@@ -347,7 +347,9 @@ def main():
         "max_chunk_length": 440,
         "language": "de",
         "temperature": 0.60,
-        "repetition_penalty": 2.0,
+        "top_p": 0.85,
+	"top_k": 30,
+	"repetition_penalty": 1.1,
     }
     
     # Pfad-Validierung
