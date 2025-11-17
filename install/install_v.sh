@@ -1,60 +1,98 @@
 #!/bin/bash
 set -e
 
-echo "=== FFmpeg-Build mit NVENC (CUDA 12.1.1 Devel + nvcc) ==="
+echo "=== FFmpeg NVENC Auto-Compatible Build ==="
 
-# Abhängigkeiten (Ubuntu 22.04)
 apt update -qq
 apt install -y \
     build-essential git yasm nasm pkg-config \
-    libx264-dev libx265-dev libvpx-dev \
-    libfdk-aac-dev libmp3lame-dev libopus-dev \
-    libass-dev libfreetype6-dev zlib1g-dev libnuma-dev \
-    || { echo "Abhängigkeiten fehlgeschlagen!"; exit 1; }
+    libfreetype6-dev libfontconfig1-dev libfribidi-dev \
+    libass-dev zlib1g-dev libnuma-dev
 
-# CUDA-Pfad (Devel-Image hat nvcc)
-export CUDA_HOME=/usr/local/cuda
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+echo "→ NVIDIA Driver Version:"
+DRV=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 | cut -d'.' -f1)
+echo "Gefundener Treiber: $DRV"
 
-# nvcc testen (Devel-Image)
-nvcc --version || { echo "nvcc fehlt! Image-Probleme?"; exit 1; }
-echo "nvcc: $(nvcc --version | head -n1)"
+# -------------------------------------------
+# 1. WÄHLE DIE PASSENDE NV-CODEC-HEADERS VERSION
+# -------------------------------------------
 
-# FFmpeg Source
-cd /tmp
-rm -rf ffmpeg
-git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git
-cd ffmpeg
+rm -rf /tmp/nv-codec-headers
+mkdir -p /tmp/nv-codec-headers
 
-# Configure (sauber: NVENC für RTX 40, compute_89)
-NVCCFLAGS="-gencode=arch=compute_89,code=sm_89 -O2"
+if [ "$DRV" -ge 570 ]; then
+    echo "→ Nutze nv-codec-headers (NEU) für Treiber 570+"
+    git clone --depth 1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
 
-./configure \
-    --enable-gpl --enable-nonfree \
-    --enable-nvenc --enable-cuda-nvcc --enable-libnpp --enable-cuvid \
-    --enable-libx264 --enable-libx265 --enable-libvpx \
-    --enable-libfdk-aac --enable-libmp3lame --enable-libopus \
-    --enable-libass --enable-libfreetype \
-    --extra-cflags="-I$CUDA_HOME/include" \
-    --extra-ldflags="-L$CUDA_HOME/lib64" \
-    --nvccflags="$NVCCFLAGS" \
-    || { echo "Configure fehlgeschlagen! Prüfe config.log"; exit 1; }
+elif [ "$DRV" -ge 550 ]; then
+    echo "→ Nutze nv-codec-headers 12.x für Treiber 550–569"
+    git clone -b sdk/12.1.14 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
 
-# Build & Install
-make -j$(nproc)
-make install
-
-# Cleanup
-cd / && rm -rf /tmp/ffmpeg
-
-# Test
-echo "FFmpeg Version: $(ffmpeg -version | head -n1)"
-if ffmpeg -encoders | grep -q h264_nvenc; then
-    echo "=== NVENC AKTIV! ==="
-    ffmpeg -encoders | grep nvenc | head -3
 else
-    echo "=== NVENC FEHLT – prüfe: nvidia-smi -q -d SUPPORTED_CLOCKS | grep Encoder ==="
+    echo "→ Nutze nv-codec-headers 11.x für ältere Treiber (<550)"
+    git clone -b sdk/11.1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
 fi
 
-echo "=== Build FERTIG! ==="
+echo "→ Installiere nv-codec-headers"
+make -C /tmp/nv-codec-headers install PREFIX=/usr/local
+
+# -------------------------------------------
+# 2. FFmpeg BUILDEN
+# -------------------------------------------
+
+echo "→ Lade FFmpeg (git trunk)"
+rm -rf /tmp/ffmpeg
+git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg
+cd /tmp/ffmpeg
+
+NVCCFLAGS="-gencode=arch=compute_89,code=sm_89 -O2"
+
+echo "→ Konfiguriere FFmpeg"
+./configure \
+  --prefix=/usr/local \
+  --disable-shared --enable-static \
+  --enable-gpl \
+  --enable-nonfree \
+  --enable-cuda \
+  --enable-cuda-nvcc \
+  --enable-nvenc \
+  --enable-libnpp \
+  --extra-cflags="-I/usr/local/cuda/include" \
+  --extra-ldflags="-L/usr/local/cuda/lib64" \
+  --nvccflags="$NVCCFLAGS" \
+  --enable-libfontconfig \
+  --enable-libfreetype \
+  --enable-libfribidi \
+  --enable-libass \
+  --disable-doc
+
+echo "→ Baue FFmpeg"
+make -j$(nproc)
+
+echo "→ Installiere FFmpeg"
+make install
+
+# -------------------------------------------
+# 3. PYTORCH AUTO-INSTALL
+# -------------------------------------------
+
+echo "=== Prüfe PyTorch ==="
+if python3 -c "import torch" 2>/dev/null; then
+    echo "✔ PyTorch bereits installiert."
+else
+    echo "→ Installiere PyTorch CUDA 12.1..."
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+fi
+
+# -------------------------------------------
+# 4. TESTS
+# -------------------------------------------
+
+echo "=== Test NVENC ==="
+/usr/local/bin/ffmpeg -encoders | grep nvenc || echo "❌ NVENC fehlt!"
+
+echo "=== Test drawtext ==="
+/usr/local/bin/ffmpeg -filters | grep drawtext || echo "❌ drawtext fehlt!"
+
+echo "=== INSTALLATION FERTIG ==="
+echo "FFmpeg unter: /usr/local/bin/ffmpeg"
