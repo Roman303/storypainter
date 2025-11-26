@@ -1,0 +1,47 @@
+#!/bin/bash
+set -e
+
+echo "=== FFmpeg FINAL NVENC Build (Static, CUDA, Drawtext) ==="
+
+apt update -qq
+apt install -y \
+    build-essential git yasm nasm pkg-config \
+    libfreetype6-dev libfontconfig1-dev libfribidi-dev \
+    libass-dev zlib1g-dev libnuma-dev
+
+echo "→ Installiere nv-codec-headers"
+rm -rf /tmp/nv-codec-headers
+git clone --depth 1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv-codec-headers
+make -C /tmp/nv-codec-headers install PREFIX=/usr/local
+
+echo "→ Lade FFmpeg (git)"
+rm -rf /tmp/ffmpeg
+git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg
+cd /tmp/ffmpeg
+
+NVCCFLAGS="-gencode=arch=compute_89,code=sm_89 -O2"
+
+echo "→ Konfiguriere FFmpeg mit NVENC + DRAWtext (static binary)"
+./configure \
+  --prefix=/usr/local \
+  --disable-shared --enable-static \
+  --enable-gpl \
+  --enable-nonfree \
+  --enable-cuda \
+  --enable-cuda-nvcc \
+  --enable-nvenc \
+  --enable-libnpp \
+  --extra-cflags="-I/usr/local/cuda/include" \
+  --extra-ldflags="-L/usr/local/cuda/lib64" \
+  --nvccflags="$NVCCFLAGS" \
+  --enable-libfontconfig \
+  --enable-libfreetype \
+  --enable-libfribidi \
+  --enable-libass \
+  --disable-doc
+
+echo "→ Baue FFmpeg"
+make -j$(nproc)
+
+echo "→ Installiere FFmpeg"
+make install
