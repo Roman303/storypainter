@@ -22,7 +22,7 @@ pip install --upgrade pip
 # PyTorch
 echo "🔥 Installiere PyTorch..."
 pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
+pip install xformers==0.0.23.post1 --index-url https://download.pytorch.org/whl/cu118
 # PERFEKT kompatible Versionen:
 echo "📦 Installiere kompatible Pakete..."
 pip install \
