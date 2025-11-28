@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WORKING !!!Story Pipeline v10 – GPU (NVENC), optional Ken-Burns-Zoom, Blur/Darken bei Text
+Story Pipeline v10 – GPU (NVENC), ohne Zoom, Blur/Darken bei Text
 
-- Optionaler Ken-Burns-Zoom mit Torch (wenn installiert), gesteuert über:
-    --enable-zoom
-    --zoom-strength 0.0..1.0
-    --zoom-direction (none/left/right/...)
-- Blur/Darken bei Text und Intro wie bisher.
+- Keine Torch-/CUDA-PyTorch-Abhängigkeit.
+- Keine Ken-Burns/Zoom mehr.
+- Nur ffmpeg + h264_nvenc (GPU-Encode).
+- Pro Szene:
+  * Bild (oder schwarz) wird auf 1920x1080 skaliert.
+  * Fade-In/Fade-Out gemäß metadata.json (mit Gap/2 vor/nach Szene).
+  * Während Titel/Text: Bild wird leicht abgedunkelt + weichgezeichnet (Blur).
+  * Titel + Screen-Text mit sanfter Alpha-Animation (if/lt) und optional Glow.
 """
 
 from __future__ import annotations
@@ -17,16 +20,6 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional
-
-# ---- optionale Torch-Abhängigkeit für Ken-Burns ----
-try:
-    import torch
-    import torchvision.transforms.functional as TF
-    from torchvision.io import read_image
-    from PIL import Image
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
 
 
 # ---------------- utils ----------------
@@ -86,156 +79,6 @@ def color_to_ffmpeg(c: str, alpha: float = 1.0) -> str:
     return f"{c}@{alpha:.3f}"
 
 
-def has_nvenc() -> bool:
-    """Prüfen, ob h264_nvenc verfügbar ist."""
-    try:
-        r = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True, text=True, check=True, timeout=5
-        )
-        return "h264_nvenc" in r.stdout
-    except Exception:
-        return False
-
-
-# ------------- Ken-Burns GPU (aus Beispielscript übernommen) -------------
-def ken_burns_gpu_jpeg(
-    img_path: Path, out_path: Path, width: int, height: int, fps: int,
-    clip_dur: float, fi_start: float, fi_dur: float, fo_start: float, fo_dur: float,
-    zoom_start: float = 1.0, zoom_end: float = 1.05, pan: str = "none",
-    ease: str = "ease_in_out", nvenc: bool = True
-) -> Path:
-    """GPU Ken-Burns mit JPEG (Torch-basiert)."""
-    if not TORCH_AVAILABLE:
-        raise RuntimeError("PyTorch / torchvision nicht verfügbar – Ken-Burns deaktiviert.")
-
-    import tempfile, time
-
-    start_time = time.time()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
-
-    num_frames = max(1, int(round(clip_dur * fps)))
-    tmp_dir = Path(tempfile.mkdtemp(prefix="kb_"))
-
-    print(f"   📥 Ken-Burns: lade Bild {img_path} …")
-    img = read_image(str(img_path)).to(device=device, dtype=dtype) / 255.0
-    C, H, W = img.shape
-    print(f"   ✅ Bildgröße: {W}x{H}")
-
-    def ease_fn(t: float) -> float:
-        if ease == "ease_in_out":
-            return t*t*t*(t*(t*6 - 15) + 10)
-        elif ease == "ease_in":
-            return t*t
-        elif ease == "ease_out":
-            return 1 - (1-t)*(1-t)
-        return t
-
-    pan_dx, pan_dy = 0.0, 0.0
-    if pan in ("left", "right", "up", "down", "diag_tl", "diag_tr", "diag_bl", "diag_br"):
-        mapping = {
-            "left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1),
-            "diag_tl": (-1, -1), "diag_tr": (1, -1),
-            "diag_bl": (-1, 1), "diag_br": (1, 1),
-        }
-        pan_dx, pan_dy = mapping[pan]
-        norm = (pan_dx*pan_dx + pan_dy*pan_dy) ** 0.5
-        if norm > 0:
-            pan_dx, pan_dy = pan_dx / norm, pan_dy / norm
-
-    print(f"   🎨 Rendering {num_frames} Frames …")
-
-    frames_saved = 0
-    batch_size = 60
-
-    for batch_start in range(0, num_frames, batch_size):
-        batch_end = min(batch_start + batch_size, num_frames)
-
-        for i in range(batch_start, batch_end):
-            t = i / (num_frames - 1) if num_frames > 1 else 0.0
-            et = ease_fn(t)
-            scale = zoom_start + (zoom_end - zoom_start) * et
-
-            new_h, new_w = int(H * scale), int(W * scale)
-            if new_h < height or new_w < width:
-                scale_factor = max(height / new_h, width / new_w)
-                new_h, new_w = int(new_h * scale_factor), int(new_w * scale_factor)
-
-            zimg = TF.resize(img, [new_h, new_w], interpolation=TF.InterpolationMode.BICUBIC)
-
-            max_off_x, max_off_y = max(0, new_w - width), max(0, new_h - height)
-            cx = int(max_off_x * 0.5 * (1 + pan_dx * (2 * et - 1)))
-            cy = int(max_off_y * 0.5 * (1 + pan_dy * (2 * et - 1)))
-            off_x = clamp(cx - width // 2, 0, max_off_x)
-            off_y = clamp(cy - height // 2, 0, max_off_y)
-
-            zimg = zimg[:, off_y:off_y + height, off_x:off_x + width]
-            if zimg.shape[1] != height or zimg.shape[2] != width:
-                zimg = TF.center_crop(zimg, [height, width])
-
-            tt = i / fps
-            alpha = 1.0
-            if fi_dur > 0 and tt >= fi_start:
-                alpha = min(alpha, (tt - fi_start) / fi_dur)
-            if fo_dur > 0 and tt >= fo_start:
-                alpha = min(alpha, max(0.0, (clip_dur - tt) / fo_dur))
-            alpha = float(clamp(alpha, 0.0, 1.0))
-
-            frame_tensor = (zimg.clamp(0, 1) * alpha * 255).to(dtype=torch.uint8).cpu()
-            frame_np = frame_tensor.numpy().transpose(1, 2, 0)
-
-            Image.fromarray(frame_np, 'RGB').save(
-                tmp_dir / f"{i:06d}.jpg",
-                quality=95, optimize=False, progressive=False
-            )
-            frames_saved += 1
-
-        elapsed = time.time() - start_time
-        fps_current = frames_saved / elapsed if elapsed > 0 else 0
-        eta = (num_frames - frames_saved) / fps_current if fps_current > 0 else 0
-        print(
-            f"   ⏳ {frames_saved}/{num_frames} "
-            f"({frames_saved*100//num_frames}%) | {fps_current:.0f} fps | ETA: {int(eta)}s",
-            end="\r"
-        )
-
-        if device == "cuda":
-            torch.cuda.empty_cache()
-
-    elapsed = time.time() - start_time
-    print(f"\n   ✅ {frames_saved} Frames | {elapsed:.1f}s | {frames_saved/elapsed:.0f} fps")
-
-    print(f"   🎬 Encoding Ken-Burns-Clip …")
-    encode_start = time.time()
-
-    if nvenc and has_nvenc():
-        enc = ["-c:v", "h264_nvenc", "-preset", "p7", "-b:v", "15M"]
-    else:
-        enc = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-threads", "8"]
-
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-framerate", str(fps), "-i", str(tmp_dir / "%06d.jpg"),
-        "-pix_fmt", "yuv420p", *enc, str(out_path)
-    ]
-
-    result = subprocess.run(cmd, capture_output=True)
-    encode_time = time.time() - encode_start
-
-    if result.returncode != 0:
-        stderr = result.stderr.decode('utf-8', errors='ignore')
-        print(f"   ⚠️ FFmpeg: {stderr[:300]}")
-
-    if out_path.exists():
-        size_mb = out_path.stat().st_size / 1024 / 1024
-        total_time = time.time() - start_time
-        print(f"   ✅ Video: {size_mb:.1f} MB | encode: {encode_time:.1f}s | total: {total_time:.1f}s")
-
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    return out_path
-
-
 # ------------- timing helpers -------------
 def compute_scene_windows(scenes) -> Tuple[list, list, list]:
     """
@@ -273,121 +116,170 @@ def render_intro_clip(
     author: str,
     fontfile: Optional[str],
     color_main: str,
-    darken: float = -0.20,
+    darken: float = -0.18,
     blur_sigma: float = 6.0
 ):
     """
-    Intro:
-    - Quelle (Video/Bild oder schwarz)
-    - ab t=2.0s: Bild leicht abdunkeln + blur (step, kein animierter Blend → stabil)
-    - Titel + Autor ab t=2.0 bis (T-2.5), mit Alpha-Fades
-    - Video selbst fadet 1.5s vor Ende aus.
+    Finale, robuste Intro-Funktion:
+    1) unblur.mp4     = scharfes Hintergrundvideo
+    2) blur.mp4       = geblurtes Hintergrundvideo
+    3) xfade_bg.mp4   = weicher Blur-Fade (0.0–1.5s)
+    4) intro_bg.mp4   = xfade + global Fade-Out (8.5–10s)
+    5) final.mp4      = intro_bg + Text Overlay (Fade-in/out)
+
+    Kein Expression-Salat, kein GEQ, kein colorchannelmixer, 100% stabil.
     """
-    T = clip_dur
 
-    # Zeiten
-    blur_start = 2.0
-    blur_end   = max(blur_start, T - 1.5)
-    title_in   = 2.0
-    title_fi   = 0.8
-    title_out_dur = 1.0
-    title_off  = max(0.0, T - 2.5)
-    author_in  = 2.0
-    author_fi  = 1.0
-    author_off = max(0.0, T - 2.5)
+    # ------------------------------------------------------------------------------------
+    # Vorbereitung
+    # ------------------------------------------------------------------------------------
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # alpha-Ausdrücke ohne clip()/pow()
-    # Titel:
-    t_s = title_in
-    t_e_in = t_s + title_fi
-    t_hold_end = title_off
-    t_out_end  = title_off + title_out_dur
+    tmp_unblur = out_path.with_suffix(".unblur.mp4")
+    tmp_blur   = out_path.with_suffix(".blur.mp4")
+    tmp_xfade  = out_path.with_suffix(".xfade_bg.mp4")
+    tmp_bg     = out_path.with_suffix(".intro_bg.mp4")
 
-    alpha_title = (
-        f"if(lt(t,{t_s}),0,"
-        f" if(lt(t,{t_e_in}), (t-{t_s})/{title_fi},"
-        f"  if(lt(t,{t_hold_end}),1,"
-        f"   if(lt(t,{t_out_end}), ({t_out_end}-t)/{title_out_dur},0))))"
-    )
-
-    # Author:
-    a_s = author_in
-    a_e_in = a_s + author_fi
-    a_hold_end = author_off
-    a_out_end  = author_off + 1.0
-
-    alpha_author = (
-        f"if(lt(t,{a_s}),0,"
-        f" if(lt(t,{a_e_in}), (t-{a_s})/{author_fi},"
-        f"  if(lt(t,{a_hold_end}),1,"
-        f"   if(lt(t,{a_out_end}), ({a_out_end}-t)/1.0,0))))"
-    )
-
-    blur_enable = f"between(t,{blur_start},{blur_end})"
-
-    # Input
-    if src is not None and src.exists():
-        if src.suffix.lower() in {".mp4", ".mov", ".webm", ".avi", ".mkv"}:
-            inputs = ["-i", str(src)]
-            base = "[0:v]"
+    # ----------------- Input-Quelle -----------------
+    if src and src.exists():
+        if src.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
+            bg_inputs = ["-i", str(src)]
+            bg_base = "[0:v]"
         else:
-            inputs = ["-loop", "1", "-t", f"{clip_dur:.6f}", "-r", str(fps), "-i", str(src)]
-            base = "[0:v]"
+            bg_inputs = ["-loop", "1", "-t", str(clip_dur), "-i", str(src)]
+            bg_base = "[0:v]"
     else:
-        inputs = ["-f", "lavfi", "-t", f"{clip_dur:.6f}", "-i", f"color=c=black:s={width}x{height}:r={fps}"]
-        base = "[0:v]"
+        bg_inputs = ["-f","lavfi","-t",str(clip_dur),
+                     "-i",f"color=c=black:s={width}x{height}:r={fps}"]
+        bg_base = "[0:v]"
 
+    # ------------------------------------------------------------------------------------
+    # (1) UNBLUR-HINTERGRUND
+    # ------------------------------------------------------------------------------------
+    cmd_unblur = [
+        "ffmpeg","-y",
+        *bg_inputs,
+        "-filter_complex",
+        f"{bg_base}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
+        "-an",
+        str(tmp_unblur)
+    ]
+    run(cmd_unblur)
+
+    # ------------------------------------------------------------------------------------
+    # (2) BLUR-HINTERGRUND
+    # ------------------------------------------------------------------------------------
+    cmd_blur = [
+        "ffmpeg","-y",
+        *bg_inputs,
+        "-filter_complex",
+        f"{bg_base}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1,"
+        f"gblur=sigma={blur_sigma},eq=brightness={darken}[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
+        "-an",
+        str(tmp_blur)
+    ]
+    run(cmd_blur)
+
+    # ------------------------------------------------------------------------------------
+    # (3) XFADE → weich einbluren (0.0–1.5)
+    #    Blur-Video startet wie das Master bei t=0 und wird weich eingeblendet.
+    # ------------------------------------------------------------------------------------
+    cmd_xfade = [
+        "ffmpeg","-y",
+        "-i", str(tmp_unblur),
+        "-i", str(tmp_blur),
+        "-filter_complex",
+        "xfade=transition=fade:duration=1.5:offset=0.0[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
+        "-an",
+        str(tmp_xfade)
+    ]
+    run(cmd_xfade)
+
+    # ------------------------------------------------------------------------------------
+    # (4) Fade-Out (8.5 → 10.0) auf das XFADE-Video
+    # ------------------------------------------------------------------------------------
+    cmd_bg = [
+        "ffmpeg","-y",
+        "-i", str(tmp_xfade),
+        "-filter_complex",
+        "fade=t=out:st=8.5:d=1.5[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
+        "-an",
+        str(tmp_bg)
+    ]
+    run(cmd_bg)
+
+    # ------------------------------------------------------------------------------------
+    # (5) TEXT OVERLAY (Fade-In, Fade-Out)
+    # ------------------------------------------------------------------------------------
     txt_title  = esc_txt(title or "")
     txt_author = esc_txt(author or "")
-    fontopt = f":fontfile='{esc_txt(fontfile)}'" if fontfile else ""
+    fontopt    = f":fontfile='{esc_txt(fontfile)}'" if fontfile else ""
+
     col_main = color_to_ffmpeg(color_main, 1.0)
     col_soft = color_to_ffmpeg(color_main, 0.4)
 
-    fi_start = 0.0
-    fi_dur   = 0.0
-    fo_dur   = 1.5
-    fo_start = max(0.0, T - fo_dur)
-
-    flt = (
-        f"{base}"
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1,"
-        f"fade=t=in:st={fi_start:.6f}:d={fi_dur:.6f},"
-        f"fade=t=out:st={fo_start:.6f}:d={fo_dur:.6f}[raw];"
-        f"[raw]eq=brightness={darken:.3f}:enable='{blur_enable}',"
-        f"gblur=sigma={blur_sigma}:enable='{blur_enable}'[bg];"
-        f"[bg]drawtext=text='{txt_title}':fontsize=72:fontcolor={col_main}{fontopt}:"
-        f"alpha='{alpha_title}':x=(w-text_w)/2:y=(h-text_h)/2-60:"
-        f"shadowcolor=black:shadowx=2:shadowy=2,"
-        f"drawtext=text='{txt_title}':fontsize=72:fontcolor={col_soft}{fontopt}:"
-        f"alpha='{alpha_title}*0.5':x=(w-text_w)/2:y=(h-text_h)/2-60+1:"
-        f"shadowcolor=black:shadowx=0:shadowy=0,"
-        f"drawtext=text='{txt_author}':fontsize=42:fontcolor={col_main}{fontopt}:"
-        f"alpha='{alpha_author}':x=(w-text_w)/2:y=(h-text_h)/2+40:"
-        f"shadowcolor=black:shadowx=2:shadowy=2[v]"
+    # Text Alpha-Formel (sehr stabil)
+    alpha_text = (
+        "if(lt(t,2.0),0,"
+        " if(lt(t,3.0),(t-2.0)/1.0,"
+        "  if(lt(t,8.5),1,"
+        "   if(lt(t,9.5),(9.5-t)/1.0,0))))"
     )
 
-    cmd = [
+    flt_txt = (
+        "[0:v]format=yuv420p,setsar=1"
+        # Titel
+        f",drawtext=text='{txt_title}':fontsize=72:fontcolor={col_main}{fontopt}:"
+        f"alpha='{alpha_text}':x=(w-text_w)/2:y=(h-text_h)/2-80"
+        # Glow
+        f",drawtext=text='{txt_title}':fontsize=72:fontcolor={col_soft}{fontopt}:"
+        f"alpha='({alpha_text})*0.4':x=(w-text_w)/2:y=(h-text_h)/2-79"
+        # Autor
+        f",drawtext=text='{txt_author}':fontsize=42:fontcolor={col_main}{fontopt}:"
+        f"alpha='{alpha_text}':x=(w-text_w)/2:y=(h-text_h)/2+40[v]"
+    )
+
+    cmd_final = [
         "ffmpeg", "-y",
-        *inputs,
-        "-filter_complex", flt,
+        "-itsoffset", "2.0",        # zeitliche Ausrichtung wie bisher
+        "-i", str(tmp_bg),
+        "-filter_complex", flt_txt,
         "-map", "[v]",
+        "-t", str(clip_dur),
         "-r", str(fps),
-        "-t", f"{clip_dur:.6f}",
         "-an",
-        "-c:v", "h264_nvenc",
-        "-preset", "p5",
-        "-b:v", "8M",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
         str(out_path)
     ]
-    run(cmd, quiet=False)
+    run(cmd_final)
+
+    # ------------------------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------------------------
+    for f in [tmp_unblur, tmp_blur, tmp_xfade, tmp_bg]:
+        try:
+            f.unlink(missing_ok=True)
+        except:
+            pass
 
 
-# --------- Szenen: Bild/Video + Blur/Darken + Text ---------
+
+# --------- Szenen: Bild + Blur/Darken + Text ---------
 def render_scene_image_clip(
-    src_visual: Optional[Path],
+    src_img: Optional[Path],
     out_path: Path,
     width: int,
     height: int,
@@ -415,10 +307,11 @@ def render_scene_image_clip(
     text_fontsize: int
 ) -> Path:
     """
-    Quelle (Bild ODER Video) → 1920x1080, Fade-In/Out, Blur+Darken während Text/Titel,
-    dazu cineastische Text-Overlays. Kein zusätzlicher Zoom – der Ken-Burns-Zoom kommt
-    (falls aktiv) schon vorher in src_visual rein.
+    Bild (oder schwarz) → 1920x1080, Fade-In/Out, Blur+Darken während Text/Titel,
+    dazu cineastische Text-Overlays. Kein Zoom.
     """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    
     has_title = bool(screen_title and screen_title.strip())
     has_text  = bool(screen_text and screen_text.strip())
 
@@ -436,7 +329,7 @@ def render_scene_image_clip(
     fi_start = max(0.0, fi_start)
     fi_dur   = max(0.0, fi_dur)
 
-    # Title-Alpha
+    # Title-Alpha ohne clip
     if has_title:
         t_s = title_start
         t_d = max(0.1, title_duration)
@@ -452,7 +345,7 @@ def render_scene_image_clip(
     else:
         alpha_title = "0"
 
-    # Text-Alpha
+    # Text-Alpha ohne clip
     if has_text:
         ts = text_start
         te = text_stop
@@ -469,7 +362,7 @@ def render_scene_image_clip(
     else:
         alpha_text = "0"
 
-    # Blur/Darken-Fenster
+    # Blur/Darken-Fenster: sobald irgendein Text/Titel aktiv ist
     if has_title or has_text:
         bg_start = min(title_start if has_title else text_start,
                        text_start if has_text else title_start)
@@ -482,7 +375,7 @@ def render_scene_image_clip(
 
     blur_enable = f"between(t,{bg_start},{bg_end})"
 
-    # Vorleuchten
+    # optionales „Vorleuchten“ für Screentext
     if cinematic_text and has_text:
         pre_start = max(0.0, text_start - 0.25)
         pre_mid   = text_start
@@ -495,21 +388,16 @@ def render_scene_image_clip(
     else:
         pre_alpha_text = "0"
 
-    # Quelle: Video oder Bild
-    if src_visual and src_visual.exists():
-        if src_visual.suffix.lower() in {".mp4", ".mov", ".webm", ".avi", ".mkv"}:
-            # Ken-Burns-Clip oder anderes Video
-            inputs = ["-i", str(src_visual)]
-            base = "[0:v]"
-        else:
-            # Standbild
-            inputs = ["-loop", "1", "-t", f"{clip_dur:.6f}", "-r", str(fps), "-i", str(src_visual)]
-            base = "[0:v]"
+    # Bildquelle
+    if src_img and src_img.exists():
+        inputs = ["-loop", "1", "-t", f"{clip_dur:.6f}", "-r", str(fps), "-i", str(src_img)]
+        base = "[0:v]"
     else:
         inputs = ["-f", "lavfi", "-t", f"{clip_dur:.6f}", "-i",
                   f"color=c=black:s={width}x{height}:r={fps}"]
         base = "[0:v]"
 
+    # Aufbau Filtergraph
     flt_parts = []
 
     # 1. RAW
@@ -529,7 +417,7 @@ def render_scene_image_clip(
 
     current = "[bg]"
 
-    # 3. optional Vorleuchten
+    # 3. optional Vorleuchten Layer (Text)
     if has_text and cinematic_text:
         flt_parts.append(
             f"{current}drawtext=text='{txt_text}':fontsize={text_fontsize}:fontcolor={col_soft}{fontopt}:"
@@ -546,6 +434,7 @@ def render_scene_image_clip(
             f"shadowcolor=black:shadowx=2:shadowy=2[tt1]"
         )
         current = "[tt1]"
+        # Glow
         if glow_amount > 0.0:
             flt_parts.append(
                 f"{current}drawtext=text='{txt_title}':fontsize={title_fontsize}:fontcolor={col_soft}{fontopt}:"
@@ -563,6 +452,7 @@ def render_scene_image_clip(
         )
         current = "[v]"
     else:
+        # kein Text, einfach bg => v
         flt_parts.append(f"{current}copy[v]")
         current = "[v]"
 
@@ -600,10 +490,7 @@ class StoryV10:
         glow_amount: float,
         cinematic_text: bool,
         title_fontsize: int,
-        text_fontsize: int,
-        enable_zoom: bool,
-        zoom_strength: float,
-        zoom_direction: str
+        text_fontsize: int
     ):
         self.images_dir = Path(images_dir)
         self.output_dir = Path(output_dir)
@@ -633,14 +520,6 @@ class StoryV10:
         self.title_fontsize = title_fontsize
         self.text_fontsize = text_fontsize
 
-        # Zoom-Settings
-        self.enable_zoom = enable_zoom and TORCH_AVAILABLE
-        self.zoom_strength = clamp(zoom_strength, 0.0, 1.0)
-        self.zoom_direction = zoom_direction
-
-        if enable_zoom and not TORCH_AVAILABLE:
-            print("⚠️  --enable-zoom gesetzt, aber Torch nicht verfügbar – Zoom wird ignoriert.")
-
         # Titel/Autor optional aus meta oder book_info
         self.title = self.meta.get("title") or self.meta.get("book_info", {}).get("title", "")
         self.author = self.meta.get("author") or self.meta.get("book_info", {}).get("author", "")
@@ -651,9 +530,6 @@ class StoryV10:
         print("👤 Autor:", self.author)
         print("📼 Szenen:", len(self.scenes_meta))
         print("📝 book_scenes:", len(self.book_scenes))
-        if self.enable_zoom:
-            print(f"🔍 Ken-Burns aktiv – strength={self.zoom_strength:.2f}, dir={self.zoom_direction}")
-
 
     @staticmethod
     def _is_image(p: Path) -> bool:
@@ -713,7 +589,7 @@ class StoryV10:
             end   = float(s["end_time"])
             base_dur = max(0.0, end - start)
             clip_dur = base_dur + half_prev[i] + half_next[i]
-
+            
             fi_start = half_prev[i]
             fi_dur   = clamp(fade_in, 0.0, clip_dur)
             fo_end   = half_prev[i] + base_dur
@@ -723,6 +599,15 @@ class StoryV10:
             src_img = self.images_dir / f"{images_prefix}{int(s.get('scene_id', i)):04d}.png"
             if not src_img.exists():
                 src_img = None
+
+            # ------------------------------------------------------
+            # NEU: Szene nur rendern, wenn Temp-File noch nicht existiert
+            # ------------------------------------------------------
+            if outp.exists():
+                print(f"⏩ Szene {i} bereits gerendert, verwende vorhandene Datei.")
+                clips.append(outp)
+                durs.append(clip_dur)
+                continue
 
             # Intro
             if stype == "intro":
@@ -758,7 +643,7 @@ class StoryV10:
             # ---------------------------------------------
             if stype == "outro":
                 print(f"🎬 Outro Szene {i}: {clip_dur:.2f}s")
-            
+
                 # Quelle suchen
                 outro_mp4 = base_path / "outro.mp4"
                 if outro_mp4.exists():
@@ -768,7 +653,7 @@ class StoryV10:
                     # Fallback: Bild der Szene
                     outro_src = src_img
                     print("   → kein outro.mp4 – fallback auf Szenenbild.")
-            
+
                 # ffmpeg: nur skalieren + padding, keine Effekte
                 if outro_src:
                     cmd = [
@@ -801,12 +686,12 @@ class StoryV10:
                         str(outp)
                     ]
                     run(cmd, quiet=False)
-            
+
                 clips.append(outp)
                 durs.append(clip_dur)
                 continue
 
-            # Normale Szenen (+ evtl. Outro)
+            # Normale Szenen
             b_title, b_text, b_text_start_rel, b_text_stop_rel = self._book_fields_for_scene(i, stype)
 
             text_start = half_prev[i] + max(0.0, b_text_start_rel)
@@ -821,43 +706,8 @@ class StoryV10:
 
             print(f"🖼️ Szene {i} ({stype}) – {clip_dur:.2f}s")
 
-            # ------ Ken-Burns vorbereiten (nur wenn Bild existiert und Zoom aktiv) ------
-            src_visual: Optional[Path] = src_img
-            if self.enable_zoom and src_img is not None:
-                try:
-                    kb_out = self.tmp_dir / f"kb_{i:04d}.mp4"
-                    # sanfter Zoom-In: 1.0 -> 1.0 + 0.05 * strength
-                    z_start = 1.0
-                    z_end = 1.0 + 0.05 * self.zoom_strength
-                    print(
-                        f"   🔍 Ken-Burns Szene {i}: zoom {z_start:.3f}→{z_end:.3f}, "
-                        f"dir={self.zoom_direction}"
-                    )
-                    # Fades innerhalb Ken-Burns deaktivieren – die machen wir mit ffmpeg
-                    ken_burns_gpu_jpeg(
-                        img_path=src_img,
-                        out_path=kb_out,
-                        width=width,
-                        height=height,
-                        fps=fps,
-                        clip_dur=clip_dur,
-                        fi_start=0.0,
-                        fi_dur=0.0,
-                        fo_start=clip_dur,
-                        fo_dur=0.0,
-                        zoom_start=z_start,
-                        zoom_end=z_end,
-                        pan=self.zoom_direction,
-                        ease="ease_in_out",
-                        nvenc=True
-                    )
-                    src_visual = kb_out
-                except Exception as e:
-                    print(f"   ⚠️ Ken-Burns Fehler Szene {i}: {e} – fallback auf Standbild.")
-                    src_visual = src_img
-
             render_scene_image_clip(
-                src_visual=src_visual,
+                src_img=src_img,
                 out_path=outp,
                 width=width,
                 height=height,
@@ -989,7 +839,7 @@ class StoryV10:
 # ------------- CLI -------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Story Pipeline v10 – metadata.json + book_scenes.json, Blur/Darken bei Text, optional Ken-Burns-Zoom"
+        description="Story Pipeline v10 – metadata.json + book_scenes.json, Blur/Darken bei Text (ohne Zoom, GPU only)"
     )
     ap.add_argument("--path", required=True, help="Projektbasis (darin liegt book_scenes.json)")
     ap.add_argument("--images", default=None, help="Ordner mit Bildern (default: <path>/images)")
@@ -1001,7 +851,7 @@ def main():
     ap.add_argument("--fade-in", type=float, default=1.0)
     ap.add_argument("--fade-out", type=float, default=1.0)
 
-    ap.add_argument("--overlay", default="overlay.mp4", help="Overlay-Video/Bild über gesamte Länge")
+    ap.add_argument("--overlay", default=None, help="Overlay-Video/Bild über gesamte Länge")
     ap.add_argument("--overlay-opacity", type=float, default=0.25)
     ap.add_argument("--quality", choices=["hd", "sd"], default="sd", help="Erzeuge SD-Derivat zusätzlich")
 
@@ -1013,18 +863,6 @@ def main():
                     help="Aktiviert Vorleuchten/Soft-Intro für Screentext")
     ap.add_argument("--title-fontsize", type=int, default=70)
     ap.add_argument("--text-fontsize", type=int, default=42)
-
-    # Zoom / Ken-Burns
-    ap.add_argument("--enable-zoom", action="store_true",
-                    help="Aktiviert Ken-Burns-Zoom für Szenen (Torch erforderlich)")
-    ap.add_argument("--zoom-strength", type=float, default=0.01,
-                    help="0.0–1.0 – Stärke des Zoom-In (ca. bis +5%)")
-    ap.add_argument(
-        "--zoom-direction",
-        default="none",
-        choices=["none", "left", "right", "up", "down", "diag_tl", "diag_tr", "diag_bl", "diag_br"],
-        help="Pan-Richtung für Ken-Burns-Zoom"
-    )
 
     args = ap.parse_args()
 
@@ -1051,10 +889,7 @@ def main():
         glow_amount=args.text_glow,
         cinematic_text=args.cinematic_text,
         title_fontsize=args.title_fontsize,
-        text_fontsize=args.text_fontsize,
-        enable_zoom=args.enable_zoom,
-        zoom_strength=args.zoom_strength,
-        zoom_direction=args.zoom_direction
+        text_fontsize=args.text_fontsize
     )
 
     # Schritt 1: Szenenclips

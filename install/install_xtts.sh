@@ -71,6 +71,12 @@ try:
     print('✅ TTS Import: OK')
 except ImportError as e:
     print('❌ TTS Import:', e)
+
+try:
+    from faster_whisper import WhisperModel
+    print('✅ faster-whisper Import: OK')
+except ImportError as e:
+    print('❌ faster-whisper Import:', e)
 "
 
 echo "🎉 XTTS Complete Installation fertig!"
