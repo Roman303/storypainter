@@ -592,10 +592,10 @@ def main():
         "config_path": "/workspace/storypainter/voices/teo/config.json",
         "speaker_wav": "/workspace/storypainter/voices/teo/2.wav",
         "speaker_wav": [
-            "/workspace/storypainter/voices/teo/clean_1.wav",
-            "/workspace/storypainter/voices/teo/clean_2.wav",
-            "/workspace/storypainter/voices/teo/clean_3.wav",
-            "/workspace/storypainter/voices/teo/clean_4.wav"
+            "/workspace/storypainter/voices/teo/neutral.wav",
+            "/workspace/storypainter/voices/teo/question.wav",
+            "/workspace/storypainter/voices/teo/excited.wav",
+            "/workspace/storypainter/voices/teo/sad.wav"
         ],
 
         # Dateien
