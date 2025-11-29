@@ -591,25 +591,31 @@ def main():
         "model_path": "/workspace/storypainter/voices/teo",
         "config_path": "/workspace/storypainter/voices/teo/config.json",
         "speaker_wav": "/workspace/storypainter/voices/teo/2.wav",
+        "speaker_wav": [
+            "/workspace/storypainter/voices/teo/clean_1.wav",
+            "/workspace/storypainter/voices/teo/clean_2.wav",
+            "/workspace/storypainter/voices/teo/clean_3.wav",
+            "/workspace/storypainter/voices/teo/clean_4.wav"
+        ],
 
         # Dateien
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
         "output_dir": os.path.join(base_path, "tts"),
 
         # TTS-Einstellungen
-        "max_chunk_length": 300,
+        "max_chunk_length": 240,
         "language": "de",
         "temperature": 0.70,
-        "repetition_penalty": 1.45,
+        "repetition_penalty": 1.18,
 
-        # QC (Whisper auf CPU für Stabilität)
-        "whisper_model_name": "medium",
-        "whisper_device": "cpu",
-        "whisper_compute_type": "int8",
+        # QC (Whisper large-v3 für bessere Deutsch-Erkennung)
+        "whisper_model_name": "large-v3",
+        "whisper_device": "cpu",           # CPU = stabiler, GPU = schneller
+        "whisper_compute_type": "int8",    # int8 = memory-effizient
         "qc_temperature_schedule": [0.70, 0.55, 0.35],
         "qc_cer_threshold": 0.12,
         "max_silence_sec": 0.9,
-        "retry_chunk_length": 180
+        "retry_chunk_length": 160
     }
 
     # Pfad-Validierung
