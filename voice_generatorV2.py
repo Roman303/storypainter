@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hörbuch-Generator für Szenen-basierte Audiobooks - OPTIMIERT
-- GPU-optimiert für RTX 4090
-- Originale werden als _a.wav gesichert
+Hörbuch-Generator V4 - Production Ready
+- Multi-Sample Support (4-6 Samples für natürliche Stimme)
+- Original-Backup als _a.wav
 - Kompaktes QC-Logging
-- Zuverlässiges Silence Removal
+- RTX 4070/4090 optimiert
+- Whisper large-v3 für Deutsch
 """
 
 import os
@@ -36,7 +37,6 @@ class SceneBasedAudiobookGenerator:
         self.qc_problems_file = self.output_dir / "qc_problems.json"
         self.whisper = None
 
-    # ========== PROGRESS TRACKING ==========
     def load_progress(self):
         if self.progress_file.exists():
             with open(self.progress_file, 'r') as f:
@@ -63,7 +63,6 @@ class SceneBasedAudiobookGenerator:
         with open(self.progress_file, 'w') as f:
             json.dump(progress, f, indent=2)
 
-    # ========== TEXT PROCESSING ==========
     def split_scene_into_chunks(self, scene_text, max_chunk_length=350):
         text = scene_text.replace('_', ' ')
         text = re.sub(r'\s+', ' ', text).strip()
@@ -129,7 +128,6 @@ class SceneBasedAudiobookGenerator:
     def prepare_text_for_xtts(self, raw_text: str) -> str:
         t = raw_text.strip()
         
-        # Steuerzeichen
         remove_chars = ['_', '*', '#', '|', '·', '•', '●', '►', '◄', '~']
         for c in remove_chars:
             t = t.replace(c, '')
@@ -138,7 +136,6 @@ class SceneBasedAudiobookGenerator:
         for z in zero_width:
             t = t.replace(z, "")
         
-        # Quotes normalisieren
         quote_map = {
             "«": '"', "»": '"', "„": '"', """: '"', """: '"',
             "‚": "'", "'": "'", "ʼ": "'", "´": "'", "ˈ": '"',
@@ -151,29 +148,22 @@ class SceneBasedAudiobookGenerator:
         t = re.sub(r'\s"(\s|$)', ' ', t)
         t = re.sub(r"\s'(\s|$)", ' ', t)
         
-        # Dashes
         dash_variants = ["–", "—", "―", "−", "‑", "⁃", "﹘", "﹣", "－", "ｰ"]
         for d in dash_variants:
             t = t.replace(d, ", ")
         t = re.sub(r'[\-–—]{2,}', ', ', t)
         
-        # Zahlen mit Punkt
         t = re.sub(r'(\d+)\.(\s|$)', r'\1-tes ', t)
-        
-        # Mehrfach-Punkte
         t = re.sub(r'\.{3,}', '...', t)
         
-        # Whitespaces
         t = t.replace("\u00A0", " ")
         t = t.replace("\u202F", " ")
         t = re.sub(r'\s+', ' ', t).strip()
         
-        # Leerzeichen nach Satzzeichen
         t = re.sub(r'([.!?])([A-ZÄÖÜ])', r'\1 \2', t)
         
         return t.strip()
 
-    # ========== WHISPER QC ==========
     def ensure_whisper_loaded(self):
         if self.whisper is not None:
             return
@@ -186,7 +176,7 @@ class SceneBasedAudiobookGenerator:
             return
 
         device = self.config.get("whisper_device", "cpu")
-        model_name = self.config.get("whisper_model_name", "medium")
+        model_name = self.config.get("whisper_model_name", "large-v3")
         compute_type = self.config.get("whisper_compute_type", "int8")
 
         print(f"\n🔥 Lade Whisper QC-Modell ({model_name}, device={device}, compute_type={compute_type})...")
@@ -242,12 +232,8 @@ class SceneBasedAudiobookGenerator:
         with open(self.qc_problems_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-    # ========== SILENCE REMOVAL (VERBESSERT) ==========
     def remove_long_silences(self, wav_path, max_silence_sec=1.0):
-        """
-        ZUVERLÄSSIGE Silence-Entfernung mit Librosa Energy Detection.
-        Läuft IMMER, nicht nur bei QC.
-        """
+        """Zuverlässige Silence-Entfernung mit Librosa Energy Detection"""
         try:
             y, sr = librosa.load(wav_path, sr=None)
         except Exception as e:
@@ -304,7 +290,6 @@ class SceneBasedAudiobookGenerator:
         sf.write(wav_path, new_audio, sr)
         return True
 
-    # ========== TTS + QC MIT BACKUP ==========
     def generate_chunk_audio(self, tts, chunk_text, scene_id, chunk_id, temperature, part_idx=None):
         text = self.prepare_text_for_xtts(chunk_text)
 
@@ -342,12 +327,6 @@ class SceneBasedAudiobookGenerator:
             return False
 
     def generate_chunk_with_qc(self, tts, chunk_text, scene_id, chunk_id, part_idx=None):
-        """
-        Generiert Chunk mit QC.
-        - Original wird IMMER als _a.wav gesichert
-        - Silence Removal läuft IMMER
-        - Ab 3. Versuch: Log in qc_problems.json
-        """
         base_temp = self.config.get("temperature", 0.70)
         temp_schedule = self.config.get("qc_temperature_schedule", [base_temp, 0.55, 0.35])
         cer_threshold = self.config.get("qc_cer_threshold", 0.08)
@@ -358,7 +337,6 @@ class SceneBasedAudiobookGenerator:
         last_cer = 1.0
         attempts = 0
 
-        # Ohne Whisper: einmal rendern + Silence Fix
         if self.whisper is None:
             print("           ⚠️ QC deaktiviert (kein Whisper) – rendere ohne Prüfung")
             path = self.generate_chunk_audio(tts, chunk_text, scene_id, chunk_id, base_temp, part_idx=part_idx)
@@ -375,14 +353,11 @@ class SceneBasedAudiobookGenerator:
             if not path:
                 continue
             
-            # Original-Backup bei erstem Versuch
             if attempts == 1:
                 self.backup_original(path)
             
-            # Silence Fix (IMMER!)
             self.remove_long_silences(path, max_silence_sec=self.config.get("max_silence_sec", 1.0))
             
-            # Whisper QC
             transcript = self.transcribe_with_whisper(path)
             hyp_norm = self.normalize_text_for_eval(transcript)
             cer_value = self.compute_cer(ref_norm, hyp_norm)
@@ -393,7 +368,6 @@ class SceneBasedAudiobookGenerator:
             if cer_value <= cer_threshold:
                 return True, {"cer": cer_value, "attempts": attempts, "transcript": transcript}
 
-        # Nach allen Versuchen: Problem loggen
         log_chunk_id = f"{chunk_id:03d}" if part_idx is None else f"{chunk_id:03d}_part_{part_idx:02d}"
         print(f"           ⚠️ QC fehlgeschlagen nach {attempts} Versuchen (CER={last_cer:.3f})")
         self.log_qc_problem(scene_id, log_chunk_id, last_cer, attempts)
@@ -424,22 +398,19 @@ class SceneBasedAudiobookGenerator:
     
         return True
 
-    # ========== MAIN PIPELINE ==========
     def generate_audiobook_from_scenes(self):
         from TTS.api import TTS
         import torch
 
-        print("\n🎧 SZENEN-BASIERTER HÖRBUCH-GENERATOR V4 - OPTIMIERT")
+        print("\n🎧 SZENEN-BASIERTER HÖRBUCH-GENERATOR V4 - PRODUCTION")
         print("=" * 60)
 
-        # GPU-Check
         print(f"\n🔥 Hardware-Info:")
         print(f"   CUDA verfügbar: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
             print(f"   GPU: {torch.cuda.get_device_name()}")
             print(f"   VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
-        # XTTS laden
         print("\n🔥 Lade XTTS-Modell...")
         tts = None
 
@@ -461,22 +432,17 @@ class SceneBasedAudiobookGenerator:
                 print(f"   ⚠️ HuggingFace Fehler: {e}")
                 return False
 
-        # GPU aktivieren (Auto-Detect, funktioniert mit 4070/4090/etc.)
         if torch.cuda.is_available():
-            # Optional: Spezifische GPU wählen (0, 1, 2...)
             gpu_id = self.config.get("gpu_id", 0)
             torch.cuda.set_device(gpu_id)
-            
             tts = tts.cuda()
-            torch.backends.cudnn.benchmark = True  # Performance-Boost
-            
+            torch.backends.cudnn.benchmark = True
             gpu_name = torch.cuda.get_device_name(gpu_id)
             vram = torch.cuda.get_device_properties(gpu_id).total_memory / 1024**3
             print(f"   ✅ XTTS auf GPU {gpu_id}: {gpu_name} ({vram:.1f} GB VRAM)")
         else:
             print("   ✅ XTTS auf CPU")
 
-        # Szenen laden
         print(f"\n📖 Lade Szenen aus: {self.config['scenes_file']}")
         with open(self.config["scenes_file"], 'r', encoding='utf-8') as f:
             metadata = json.load(f)
@@ -533,11 +499,9 @@ class SceneBasedAudiobookGenerator:
                 else:
                     print(f"           ⚠️ QC nicht bestanden (CER={qc_info['cer']:.3f})")
                     
-                    # Original löschen vor Re-Split
                     if base_file.exists():
                         base_file.unlink()
 
-                    # Re-Splitting
                     subchunks = self.split_problematic_chunk(
                         chunk_text,
                         self.config.get("retry_chunk_length", 180)
@@ -580,7 +544,7 @@ class SceneBasedAudiobookGenerator:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="XTTS Hörbuch Generator")
+    ap = argparse.ArgumentParser(description="XTTS Hörbuch Generator V4")
     ap.add_argument("--path", required=True, help="Basis-Pfad für Input/Output")
     args = ap.parse_args()
 
@@ -590,50 +554,80 @@ def main():
         # Custom Voice Model
         "model_path": "/workspace/storypainter/voices/teo",
         "config_path": "/workspace/storypainter/voices/teo/config.json",
-        "speaker_wav": "/workspace/storypainter/voices/teo/2.wav",
+        
+        # Multi-Sample Reference (4 Samples für natürliche Stimme)
         "speaker_wav": [
             "/workspace/storypainter/voices/teo/neutral.wav",
             "/workspace/storypainter/voices/teo/question.wav",
             "/workspace/storypainter/voices/teo/excited.wav",
             "/workspace/storypainter/voices/teo/sad.wav"
         ],
-
+        
         # Dateien
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
         "output_dir": os.path.join(base_path, "tts"),
 
         # TTS-Einstellungen
-        "max_chunk_length": 240,
+        "max_chunk_length": 300,
         "language": "de",
         "temperature": 0.70,
-        "repetition_penalty": 1.18,
+        "repetition_penalty": 1.45,
 
         # QC (Whisper large-v3 für bessere Deutsch-Erkennung)
         "whisper_model_name": "large-v3",
-        "whisper_device": "cpu",           # CPU = stabiler, GPU = schneller
-        "whisper_compute_type": "int8",    # int8 = memory-effizient
+        "whisper_device": "cpu",
+        "whisper_compute_type": "int8",
         "qc_temperature_schedule": [0.70, 0.55, 0.35],
         "qc_cer_threshold": 0.12,
         "max_silence_sec": 0.9,
-        "retry_chunk_length": 160
+        "retry_chunk_length": 180,
+        
+        # GPU
+        "gpu_id": 0
     }
 
     # Pfad-Validierung
     print("🔍 Prüfe Pfade...")
-    required = {
+    required_paths = {
         "model_path": CONFIG["model_path"],
         "config_path": CONFIG["config_path"],
-        "speaker_wav": CONFIG["speaker_wav"],
         "scenes_file": CONFIG["scenes_file"]
     }
 
-    for name, path in required.items():
+    for path_key, path in required_paths.items():
         exists = os.path.exists(path)
         status = "✅" if exists else "❌"
-        print(f"   {status} {name}: {path}")
+        print(f"   {status} {path_key}: {path}")
         if not exists:
-            print(f"\n❌ Pfad nicht gefunden: {path}")
+            print(f"\n❌ Pfad existiert nicht: {path}")
+            print(f"   Bitte korrigiere den Pfad in CONFIG['{path_key}']")
             sys.exit(1)
+    
+    # Speaker WAV(s) validieren
+    speaker_wavs = CONFIG["speaker_wav"]
+    if isinstance(speaker_wavs, str):
+        speaker_wavs = [speaker_wavs]
+    
+    print(f"\n🎤 Validiere Speaker-Samples ({len(speaker_wavs)} Dateien)...")
+    missing_samples = []
+    for wav in speaker_wavs:
+        exists = os.path.exists(wav)
+        status = "✅" if exists else "❌"
+        wav_name = os.path.basename(wav)
+        print(f"   {status} {wav_name}")
+        if not exists:
+            missing_samples.append(wav)
+    
+    if missing_samples:
+        print(f"\n⚠️ Fehlende Speaker-Samples:")
+        for wav in missing_samples:
+            print(f"   - {wav}")
+        print("\n💡 OPTIONEN:")
+        print("   A) Erstelle die 4 Samples (neutral/question/excited/sad)")
+        print("   B) Nutze vorübergehend nur 1 Sample:")
+        print("      Ändere CONFIG['speaker_wav'] zu:")
+        print('      "speaker_wav": "/workspace/storypainter/voices/teo/2.wav"')
+        sys.exit(1)
 
     print("\n✅ Alle Pfade OK\n")
 
