@@ -45,6 +45,42 @@ def run(cmd, quiet: bool = False) -> bool:
     return r.returncode == 0
 
 
+def make_gpu_zoom_filter(
+    dur,
+    zoom_factor,
+    center_w,
+    center_h,
+    direction
+):
+    if direction == "in":
+        z0 = 1.0
+        z1 = zoom_factor
+    else:
+        z0 = zoom_factor
+        z1 = 1.0
+
+    # Cosine-Ease-Formel
+    zoom_expr = (
+        f"{z0} + ({z1 - z0})*(0.5 - 0.5*cos(PI*t/{dur}))"
+    )
+
+    # Crop-Breite/Höhe
+    crop_w = f"(iw)/({zoom_expr})"
+    crop_h = f"(ih)/({zoom_expr})"
+
+    # Crop-Koordinaten (Zoomcenter beachten)
+    crop_x = f"iw*{center_w} - ({crop_w})/2"
+    crop_y = f"ih*{center_h} - ({crop_h})/2"
+
+    # GPU-Filtergraph
+    return (
+        f"hwupload_cuda,"
+        f"scale_npp=iw*{zoom_expr}:ih*{zoom_expr},"
+        f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+        f"scale_npp=1920:1080"
+    )
+
+
 def esc_txt(s: str) -> str:
     """Escape characters für drawtext."""
     if not s:
@@ -396,6 +432,20 @@ def render_scene_image_clip(
         inputs = ["-f", "lavfi", "-t", f"{clip_dur:.6f}", "-i",
                   f"color=c=black:s={width}x{height}:r={fps}"]
         base = "[0:v]"
+
+    zoom_filter = make_gpu_zoom_filter(
+        dur=clip_dur,
+        zoom_factor=1.8,
+        center_w=0.5,
+        center_h=0.5,
+        direction="in"
+    )
+
+    flt_parts.append(
+        f"{base}hwupload_cuda,{zoom_filter},hwdownload,format=yuv420p[zoomed]"
+    )
+    current = "[zoomed]"
+
 
     # Aufbau Filtergraph
     flt_parts = []
