@@ -1,98 +1,107 @@
 #!/bin/bash
-# 🎬 GPU Video Rendering Environment Installer (optimized for CUDA 11.8)
-# Installiert FFmpeg mit NVENC/NPP-Unterstützung & Python-Umgebung für story_renderer.py
-# Basis: nvidia/cuda:11.8.0-devel-ubuntu22.04
 set -e
 
-echo "🎞️  GPU Video Rendering Environment Setup startet..."
+echo "=============================="
+echo " UPDATE SYSTEM"
+echo "=============================="
+apt update -y
+apt upgrade -y
 
-# ---------------------------------------------------------------------------
-# 🧩 Systempakete
-# ---------------------------------------------------------------------------
-echo "📦 Installiere System- und Build-Tools..."
-apt update && apt install -y \
-    python3 python3-pip python3-venv python3-dev \
-    git wget curl \
-    libsm6 libxext6 libgl1 \
-    nvidia-cuda-toolkit
+echo "=============================="
+echo " INSTALL BUILD TOOLS"
+echo "=============================="
+apt install -y build-essential git pkg-config wget curl yasm nasm
 
-# ---------------------------------------------------------------------------
-# 🎬 FFmpeg mit CUDA/NVENC prüfen/inst.
-# ---------------------------------------------------------------------------
-if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "⚙️ Installiere FFmpeg (Basisversion)..."
-    apt install -y ffmpeg
-fi
+echo "=============================="
+echo " INSTALL FREETYPE + DRAW TEXT SUPPORT"
+echo "=============================="
+apt install -y libfreetype6 libfreetype6-dev libharfbuzz-dev libfribidi-dev
 
-if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q nvenc; then
-    echo "⚙️ Installiere NVIDIA FFmpeg (mit CUDA/NVENC)…"
-    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/ffmpeg4.4-nvidia_4.4.2-1_amd64.deb
-    apt install -y ./ffmpeg4.4-nvidia_4.4.2-1_amd64.deb
-    rm -f ffmpeg4.4-nvidia_4.4.2-1_amd64.deb
-else
-    echo "✅ FFmpeg mit NVENC bereits vorhanden."
-fi
+echo "=============================="
+echo " INSTALL VIDEO LIBS"
+echo "=============================="
+apt install -y libass-dev libvdpau-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+               libva-dev libdrm-dev libx264-dev libx265-dev libnuma-dev zlib1g-dev \
+               libfontconfig1-dev libxml2-dev
 
-echo ""
-echo "🎥 Verfügbare NVENC-Encoder:"
-ffmpeg -hide_banner -encoders | grep nvenc || echo "⚠️ Keine NVENC-Encoder gefunden!"
-echo ""
-echo "🎥 Verfügbare CUDA-Filter:"
-ffmpeg -hide_banner -filters | grep -E "cuda|npp" || echo "⚠️ Keine CUDA-Filter gefunden!"
+echo "=============================="
+echo " FIX OPENCV DEPENDENCIES"
+echo "=============================="
+apt install -y libgl1 libglib2.0-0 libsm6 libxext6 libxrender1
 
-# ---------------------------------------------------------------------------
-# 🧹 Alte Umgebung bereinigen
-# ---------------------------------------------------------------------------
-echo "🧹 Bereinige alte Virtual Environment..."
-rm -rf /workspace/video_env
+echo "=============================="
+echo " INSTALL PYTHON + PIP"
+echo "=============================="
+apt install -y python3 python3-pip python3-venv
 
-# ---------------------------------------------------------------------------
-# 🐍 Neue Virtual Environment
-# ---------------------------------------------------------------------------
-echo "🐍 Erstelle Python-Venv..."
-python3 -m venv /workspace/video_env
-source /workspace/video_env/bin/activate
+echo "=============================="
+echo " INSTALL PYTORCH + CUDA"
+echo "=============================="
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# ---------------------------------------------------------------------------
-# ⬆️ Upgrade pip
-# ---------------------------------------------------------------------------
-echo "⬆️ Upgrade pip..."
-pip install --upgrade pip setuptools wheel
+echo "=============================="
+echo " INSTALL PYTHON LIBS"
+echo "=============================="
+pip install numpy opencv-python pillow tqdm
 
-# ---------------------------------------------------------------------------
-# 🎨 Python-Pakete für Story Rendering
-# ---------------------------------------------------------------------------
-echo "📦 Installiere Python-Pakete..."
-pip install \
-    numpy==1.26.4 \
-    pillow==10.4.0 \
-    tqdm==4.66.3 \
-    moviepy==1.0.3 \
-    opencv-python==4.10.0.84 \
-    pydub
+echo "=============================="
+echo " INSTALL NVIDIA NVENC / NPP HEADERS"
+echo "=============================="
+apt install -y nvidia-cuda-toolkit
 
-# ---------------------------------------------------------------------------
-# ✅ Verifikation
-# ---------------------------------------------------------------------------
-echo ""
-echo "🧪 Teste GPU-Setup..."
-ffmpeg -hide_banner -hwaccels | grep -E "cuda|nvdec" || echo "⚠️ Keine CUDA-HWACCELs gefunden!"
+echo "=============================="
+echo " BUILD FFMPEG WITH NVENC + DRAWTEXT"
+echo "=============================="
 
-python - <<'PY'
-import subprocess, sys
-print("✅ Python:", sys.version.split()[0])
-try:
-    import numpy, moviepy, cv2, PIL
-    print("✅ Numpy:", numpy.__version__)
-    print("✅ MoviePy:", moviepy.__version__)
-    print("✅ OpenCV:", cv2.__version__)
-    print("✅ Pillow:", PIL.__version__)
-except Exception as e:
-    print("❌ Python-Paket-Fehler:", e)
-PY
+FFMPEG_VERSION=n6.1
 
-echo ""
-echo "🎉 GPU Video Rendering Installation abgeschlossen!"
-echo "💡 Aktivieren mit: source /workspace/video_env/bin/activate"
-echo "💡 Teste NVENC mit: ffmpeg -hide_banner -encoders | grep nvenc"
-echo "💡 Teste CUDA-Filter mit: ffmpeg -hide_banner -filters | grep cuda"
+cd /usr/local/src
+rm -rf ffmpeg
+git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg
+cd ffmpeg
+git checkout $FFMPEG_VERSION
+
+./configure \
+  --enable-gpl \
+  --enable-nonfree \
+  --enable-cuda-nvcc \
+  --enable-libnpp \
+  --extra-cflags="-I/usr/local/cuda/include" \
+  --extra-ldflags="-L/usr/local/cuda/lib64" \
+  --enable-libx264 \
+  --enable-libx265 \
+  --enable-libass \
+  --enable-libfreetype \
+  --enable-libfontconfig \
+  --enable-nvenc \
+  --enable-libdrm \
+  --enable-libvdpau \
+  --enable-libxcb \
+  --enable-libxcb-shm \
+  --enable-libxcb-xfixes \
+  --enable-libxml2 \
+  --enable-openssl \
+  --enable-libharfbuzz \
+  --enable-libfribidi \
+  --enable-ffnvcodec \
+  --enable-filter=drawtext \
+  --enable-filter=zoompan \
+  --enable-filter=gblur \
+  --enable-filter=fade \
+  --enable-filter=xfade
+
+make -j$(nproc)
+make install
+
+hash -r
+
+echo "=============================="
+echo " VERIFY FFMPEG BUILD"
+echo "=============================="
+ffmpeg -hide_banner -filters | grep drawtext || echo "❌ drawtext missing!"
+ffmpeg -hide_banner -encoders | grep nvenc || echo "❌ NVENC missing!"
+
+echo "=============================="
+echo " INSTALL DONE!"
+echo "=============================="
+echo "FFmpeg, NVENC, drawtext, CUDA, PyTorch, OpenCV → SUCCESS"

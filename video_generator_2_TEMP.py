@@ -53,20 +53,20 @@ def run(cmd, quiet: bool = False) -> bool:
 
 
 def render_zoom_scene_gpu(
-    image_path=str(src_img),
-    output_mp4=str(out_path),
-    duration=final_dur,   # ✅ NICHT mehr nur clip_dur
-    fps=fps,
-    zoom_factor=float(zoom_factor),
-    center_w=float(zoom_center_w or 0.5),
-    center_h=float(zoom_center_h or 0.5),
-    direction=zoom_direction or "in",
-    width=width,
-    height=height,
-    fade_in=pause_before,    # ✅ Pause VOR Szene
-    fade_out=pause_after,    # ✅ Pause NACH Szene
-    upscale_factor=2,
-    motion_blur_strength=0.3
+    image_path: str,
+    output_mp4: str,
+    duration: float,
+    fps: int,
+    zoom_factor: float,
+    center_w: float = 0.5,
+    center_h: float = 0.5,
+    direction: str = "in",
+    width: int = 1920,
+    height: int = 1080,
+    fade_in: float = 1.0,
+    fade_out: float = 1.0,
+    upscale_factor: int = 2,
+    motion_blur_strength: float = 0.3,
 ):
     import subprocess, math, torch
     import torch.nn.functional as F
@@ -145,16 +145,10 @@ def render_zoom_scene_gpu(
         out = (zoomed[0].permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
         proc.stdin.write(out.tobytes())
 
-    try:
-        proc.stdin.close()
-    except Exception:
-        pass
-
+    proc.stdin.close()
     proc.wait()
 
-    if proc.returncode != 0:
-        raise RuntimeError("FFmpeg GPU zoom encoding failed – MP4 ist kaputt!")
-        
+
 def make_gpu_zoom_filter(
     dur: float,
     zoom_factor: float,
@@ -232,156 +226,6 @@ def color_to_ffmpeg(c: str, alpha: float = 1.0) -> str:
     return f"{c}@{alpha:.3f}"
 
 
-def render_zoom_scene_gpu(
-    image_path: str,
-    output_mp4: str,
-    width: int,
-    height: int,
-    fps: int,
-    duration: float,
-    zoom_factor: float,
-    center_w: float,
-    center_h: float,
-    direction: str,
-    fi_start: float,
-    fi_dur: float,
-    fo_end_time: float,
-    fo_dur: float,
-    upscale_factor: int = 2,
-    motion_blur_strength: float = 0.3,
-) -> None:
-    """
-    GPU-Ken-Burns:
-    - Smooth Cosine-Zoom (in/out)
-    - Motion-Blur
-    - Fades exakt wie früher (fi_start/fi_dur, fo_end_time/fo_dur) in Sekunden
-    - Läuft komplett auf der GPU, Encoding via h264_nvenc
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # --- Bild laden ---
-    img = cv2.imread(image_path)
-    if img is None:
-        raise RuntimeError(f"Bild nicht gefunden: {image_path}")
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    # Hochskalieren für schöne Details
-    H_up = height * upscale_factor
-    W_up = width * upscale_factor
-    img = cv2.resize(img, (W_up, H_up), interpolation=cv2.INTER_CUBIC)
-
-    frame = torch.from_numpy(img).float().to(device) / 255.0  # [H,W,3]
-    frame = frame.permute(2, 0, 1).unsqueeze(0)               # [1,3,H,W]
-
-    total_frames = max(1, int(round(duration * fps)))
-
-    # Zoom-Parameter
-    if direction not in ("in", "out"):
-        direction = "in"
-
-    if direction == "in":
-        z0 = 1.0
-        z1 = float(zoom_factor)
-    else:
-        z0 = float(zoom_factor)
-        z1 = 1.0
-
-    cx = int(W_up * float(center_w))
-    cy = int(H_up * float(center_h))
-
-    # Fades
-    fi_start = max(0.0, float(fi_start))
-    fi_dur   = max(0.0, float(fi_dur))
-    fo_dur   = max(0.0, float(fo_dur))
-    fo_start = max(0.0, float(fo_end_time) - fo_dur)
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-pix_fmt", "rgb24",
-        "-s", f"{width}x{height}",
-        "-r", str(fps),
-        "-i", "-",
-        "-c:v", "h264_nvenc",
-        "-preset", "p5",
-        "-b:v", "8M",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        output_mp4,
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-
-    prev = None
-
-    for i in range(total_frames):
-        # Zeit in Sekunden
-        t = i / float(fps)
-        # Normalisierte Zeit für Zoom-Easing
-        t_norm = 0.0 if total_frames <= 1 else i / float(total_frames - 1)
-
-        # Cosine-Ease Zoom
-        z = z0 + (z1 - z0) * (0.5 - 0.5 * math.cos(math.pi * t_norm))
-
-        new_w = int(W_up / z)
-        new_h = int(H_up / z)
-
-        # Crop-Koordinaten, Center beachten, innerhalb des Bildes clampen
-        x0 = max(0, min(W_up - new_w, cx - new_w // 2))
-        y0 = max(0, min(H_up - new_h, cy - new_h // 2))
-
-        cropped = frame[:, :, y0:y0 + new_h, x0:x0 + new_w]
-
-        zoomed = F.interpolate(
-            cropped,
-            size=(height, width),
-            mode="bilinear",
-            align_corners=False,
-        )
-
-        # Motion-Blur: einfacher temporal blend
-        if prev is not None and motion_blur_strength > 0.0:
-            s = float(motion_blur_strength)
-            zoomed = zoomed * (1.0 - s) + prev * s
-        prev = zoomed.clone()
-
-        # Fade-Alpha (wie ffmpeg fade Filter, aber in PyTorch)
-        alpha = 1.0
-
-        # Fade-In
-        if fi_dur > 0.0:
-            if t < fi_start:
-                alpha = 0.0
-            elif t < fi_start + fi_dur:
-                alpha = (t - fi_start) / fi_dur
-            # danach bleibt alpha erstmal 1.0
-
-        # Fade-Out
-        if fo_dur > 0.0:
-            if t >= fo_start:
-                if t < fo_start + fo_dur:
-                    alpha_out = (fo_start + fo_dur - t) / fo_dur
-                else:
-                    alpha_out = 0.0
-                alpha = min(alpha, alpha_out)
-
-        alpha = max(0.0, min(1.0, alpha))
-        zoomed = zoomed * alpha
-
-        out = (zoomed[0].permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
-        try:
-            proc.stdin.write(out.tobytes())
-        except BrokenPipeError:
-            break
-
-    try:
-        proc.stdin.close()
-    except Exception:
-        pass
-
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError("FFmpeg GPU zoom encoding failed – MP4 ist kaputt!")
-
 # ------------- timing helpers -------------
 def compute_scene_windows(scenes) -> Tuple[list, list, list]:
     """
@@ -406,27 +250,6 @@ def compute_scene_windows(scenes) -> Tuple[list, list, list]:
             half_next[i] = 0.5 * gap
     return bases, half_prev, half_next
 
-def render_text_png(text, out_png, width=1920, height=1080, fontsize=72):
-    from PIL import Image, ImageDraw, ImageFont
-
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", fontsize)
-    except:
-        font = ImageFont.load_default()
-
-    text_w, text_h = draw.textbbox((0,0), text, font=font)[2:]
-    draw.text(
-        ((width - text_w)//2, (height - text_h)//2),
-        text,
-        font=font,
-        fill=(255,255,255,255)
-    )
-
-    img.save(out_png)
-
 
 # --------- Intro mit Titel, weicher Text & (step) Blur/Darken ---------
 def render_intro_clip(
@@ -436,32 +259,33 @@ def render_intro_clip(
     height: int,
     fps: int,
     clip_dur: float,
-    title: str,          # wird aktuell NICHT benutzt
-    author: str,         # wird aktuell NICHT benutzt
+    title: str,
+    author: str,
     fontfile: Optional[str],
     color_main: str,
     darken: float = -0.18,
-    blur_sigma: float = 6.0,
+    blur_sigma: float = 6.0
 ):
     """
-    Intro ohne Text:
-    - Hintergrund (Video oder Bild) auf 1920x1080
-    - Version scharf + geblurtes Duplikat
-    - Weiches Blur-XFade am Anfang
-    - Fade-Out am Ende
+    Finale, robuste Intro-Funktion:
+    1) unblur.mp4     = scharfes Hintergrundvideo
+    2) blur.mp4       = geblurtes Hintergrundvideo
+    3) xfade_bg.mp4   = weicher Blur-Fade (0.0–1.5s)
+    4) intro_bg.mp4   = xfade + global Fade-Out (8.5–10s)
+    5) final.mp4      = intro_bg + Text Overlay (Fade-in/out)
+
+    Kein Expression-Salat, kein GEQ, kein colorchannelmixer, 100% stabil.
     """
 
+    # ------------------------------------------------------------------------------------
+    # Vorbereitung
+    # ------------------------------------------------------------------------------------
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_unblur = out_path.with_suffix(".unblur.mp4")
     tmp_blur   = out_path.with_suffix(".blur.mp4")
     tmp_xfade  = out_path.with_suffix(".xfade_bg.mp4")
-
-    # Timing für Effekte
-    clip_dur = float(clip_dur)
-    fade_blur_dur = min(2.0, clip_dur * 0.4)
-    fade_out_dur  = min(1.5, clip_dur * 0.3)
-    fade_out_start = max(0.0, clip_dur - fade_out_dur)
+    tmp_bg     = out_path.with_suffix(".intro_bg.mp4")
 
     # ----------------- Input-Quelle -----------------
     if src and src.exists():
@@ -472,179 +296,132 @@ def render_intro_clip(
             bg_inputs = ["-loop", "1", "-t", str(clip_dur), "-i", str(src)]
             bg_base = "[0:v]"
     else:
-        bg_inputs = [
-            "-f", "lavfi",
-            "-t", str(clip_dur),
-            "-i", f"color=c=black:s={width}x{height}:r={fps}",
-        ]
+        bg_inputs = ["-f","lavfi","-t",str(clip_dur),
+                     "-i",f"color=c=black:s={width}x{height}:r={fps}"]
         bg_base = "[0:v]"
 
+    # ------------------------------------------------------------------------------------
     # (1) UNBLUR-HINTERGRUND
+    # ------------------------------------------------------------------------------------
     cmd_unblur = [
-        "ffmpeg", "-y",
+        "ffmpeg","-y",
         *bg_inputs,
         "-filter_complex",
-        f"{bg_base}"
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-        f"format=yuv420p,setsar=1[v]",
-        "-map", "[v]",
-        "-t", str(clip_dur),
-        "-r", str(fps),
+        f"{bg_base}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
         "-an",
-        str(tmp_unblur),
+        str(tmp_unblur)
     ]
     run(cmd_unblur)
 
+    # ------------------------------------------------------------------------------------
     # (2) BLUR-HINTERGRUND
+    # ------------------------------------------------------------------------------------
     cmd_blur = [
-        "ffmpeg", "-y",
+        "ffmpeg","-y",
         *bg_inputs,
         "-filter_complex",
-        f"{bg_base}"
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-        f"format=yuv420p,setsar=1,"
+        f"{bg_base}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,setsar=1,"
         f"gblur=sigma={blur_sigma},eq=brightness={darken}[v]",
-        "-map", "[v]",
-        "-t", str(clip_dur),
-        "-r", str(fps),
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
         "-an",
-        str(tmp_blur),
+        str(tmp_blur)
     ]
     run(cmd_blur)
 
-    # (3) XFADE scharf -> blur am Anfang
+    # ------------------------------------------------------------------------------------
+    # (3) XFADE → weich einbluren (0.0–1.5)
+    #    Blur-Video startet wie das Master bei t=0 und wird weich eingeblendet.
+    # ------------------------------------------------------------------------------------
     cmd_xfade = [
-        "ffmpeg", "-y",
+        "ffmpeg","-y",
         "-i", str(tmp_unblur),
         "-i", str(tmp_blur),
         "-filter_complex",
-        f"xfade=transition=fade:duration={fade_blur_dur}:offset=0.0[v]",
-        "-map", "[v]",
-        "-t", str(clip_dur),
-        "-r", str(fps),
+        "xfade=transition=fade:duration=1.5:offset=0.0[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
         "-an",
-        str(tmp_xfade),
+        str(tmp_xfade)
     ]
     run(cmd_xfade)
 
-    # (4) Fade-Out am Ende
+    # ------------------------------------------------------------------------------------
+    # (4) Fade-Out (8.5 → 10.0) auf das XFADE-Video
+    # ------------------------------------------------------------------------------------
     cmd_bg = [
-        "ffmpeg", "-y",
+        "ffmpeg","-y",
         "-i", str(tmp_xfade),
         "-filter_complex",
-        f"fade=t=out:st={fade_out_start}:d={fade_out_dur}[v]",
+        "fade=t=out:st=8.5:d=1.5[v]",
+        "-map","[v]",
+        "-t",str(clip_dur),
+        "-r",str(fps),
+        "-an",
+        str(tmp_bg)
+    ]
+    run(cmd_bg)
+
+    # ------------------------------------------------------------------------------------
+    # (5) TEXT OVERLAY (Fade-In, Fade-Out)
+    # ------------------------------------------------------------------------------------
+    txt_title  = esc_txt(title or "")
+    txt_author = esc_txt(author or "")
+    fontopt    = f":fontfile='{esc_txt(fontfile)}'" if fontfile else ""
+
+    col_main = color_to_ffmpeg(color_main, 1.0)
+    col_soft = color_to_ffmpeg(color_main, 0.4)
+
+    # Text Alpha-Formel (sehr stabil)
+    alpha_text = (
+        "if(lt(t,2.0),0,"
+        " if(lt(t,3.0),(t-2.0)/1.0,"
+        "  if(lt(t,8.5),1,"
+        "   if(lt(t,9.5),(9.5-t)/1.0,0))))"
+    )
+
+    flt_txt = (
+        "[0:v]format=yuv420p,setsar=1"
+        # Titel
+        f",drawtext=text='{txt_title}':fontsize=72:fontcolor={col_main}{fontopt}:"
+        f"alpha='{alpha_text}':x=(w-text_w)/2:y=(h-text_h)/2-80"
+        # Glow
+        f",drawtext=text='{txt_title}':fontsize=72:fontcolor={col_soft}{fontopt}:"
+        f"alpha='({alpha_text})*0.4':x=(w-text_w)/2:y=(h-text_h)/2-79"
+        # Autor
+        f",drawtext=text='{txt_author}':fontsize=42:fontcolor={col_main}{fontopt}:"
+        f"alpha='{alpha_text}':x=(w-text_w)/2:y=(h-text_h)/2+40[v]"
+    )
+
+    cmd_final = [
+        "ffmpeg", "-y",
+        "-itsoffset", "2.0",        # zeitliche Ausrichtung wie bisher
+        "-i", str(tmp_bg),
+        "-filter_complex", flt_txt,
         "-map", "[v]",
         "-t", str(clip_dur),
         "-r", str(fps),
         "-an",
-        str(out_path),
-    ]
-    run(cmd_bg)
-
-    # Cleanup
-    for f in [tmp_unblur, tmp_blur, tmp_xfade]:
-        try:
-            f.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-def render_intro_clip_with_cinematic_text(
-    src: Optional[Path],
-    out_path: Path,
-    width: int,
-    height: int,
-    fps: int,
-    clip_dur: float,
-    title: str,
-    subtitle: str,
-    fontfile: Optional[str],
-    color_main: str,
-    darken: float = -0.18,
-    blur_sigma: float = 6.0,
-):
-    """
-    Cinematic Intro:
-    - Minimaler Zoom-In (1.00 → 1.04)
-    - Weicher Blur + Darken
-    - Großer Kino-Titel + Untertitel
-    - Saubere Fades
-    """
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    txt_title    = esc_txt(title or "")
-    txt_subtitle = esc_txt(subtitle or "")
-    fontopt = f":fontfile='{esc_txt(fontfile)}'" if fontfile else ""
-
-    col_main = color_to_ffmpeg(color_main, 1.0)
-    col_soft = color_to_ffmpeg(color_main, 0.35)
-
-    # --- Timing ---
-    text_fade_in  = 0.8
-    text_fade_out = 1.5
-    zoom_end      = 1.04
-
-    text_out_start = max(0.0, clip_dur - text_fade_out)
-
-    alpha_text = (
-        f"if(lt(t,{text_fade_in}),0,"
-        f" if(lt(t,{text_fade_in+0.8}),(t-{text_fade_in})/0.8,"
-        f"  if(lt(t,{text_out_start}),1,"
-        f"   if(lt(t,{clip_dur}),({clip_dur}-t)/{text_fade_out},0))))"
-    )
-
-    # ----------------- Input -----------------
-    if src and src.exists():
-        if src.suffix.lower() in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
-            inputs = ["-i", str(src)]
-            base = "[0:v]"
-        else:
-            inputs = ["-loop", "1", "-t", str(clip_dur), "-i", str(src)]
-            base = "[0:v]"
-    else:
-        inputs = ["-f", "lavfi", "-t", str(clip_dur),
-                  "-i", f"color=c=black:s={width}x{height}:r={fps}"]
-        base = "[0:v]"
-
-    # ----------------- Filtergraph -----------------
-    flt = (
-        f"{base}"
-        # ✅ Minimaler Zoom-In (cine feel)
-        f"scale={width}:{height},"
-        f"zoompan=z='1+0.04*t/{clip_dur}':d=1:s={width}x{height},"
-        f"format=yuv420p,setsar=1,"
-        # ✅ Blur + Darken
-        f"gblur=sigma={blur_sigma},"
-        f"eq=brightness={darken},"
-        # ✅ TITEL (Haupt)
-        f"drawtext=text='{txt_title}':fontsize=78:fontcolor={col_main}{fontopt}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2-40:alpha='{alpha_text}':"
-        f"shadowcolor=black:shadowx=3:shadowy=3,"
-        # ✅ TITEL-GLOW
-        f"drawtext=text='{txt_title}':fontsize=78:fontcolor={col_soft}{fontopt}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2-38:alpha='({alpha_text})*0.4',"
-        # ✅ UNTERTITEL
-        f"drawtext=text='{txt_subtitle}':fontsize=36:fontcolor={col_main}{fontopt}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2+50:alpha='{alpha_text}'"
-    )
-
-    cmd = [
-        "ffmpeg", "-y",
-        *inputs,
-        "-filter_complex", flt,
-        "-t", str(clip_dur),
-        "-r", str(fps),
-        "-an",
-        "-c:v", "h264_nvenc",
-        "-preset", "p5",
-        "-b:v", "8M",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
         str(out_path)
     ]
-    run(cmd)
+    run(cmd_final)
+
+    # ------------------------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------------------------
+    for f in [tmp_unblur, tmp_blur, tmp_xfade, tmp_bg]:
+        try:
+            f.unlink(missing_ok=True)
+        except:
+            pass
+
 
 
 # --------- Szenen: Bild + Blur/Darken + Text ---------
@@ -659,14 +436,14 @@ def render_scene_image_clip(
     fi_dur: float,
     fo_end_time: float,
     fo_dur: float,
-    # Text & Timing (werden aktuell ignoriert)
+    # Text & Timing
     screen_title: str,
     screen_text: str,
     title_start: float,
     title_duration: float,
     text_start: float,
     text_stop: float,
-    # Blur & darken (optional, auch ohne Text nutzbar)
+    # Blur & darken
     darken: float,
     blur_sigma: float,
     fontfile: Optional[str],
@@ -679,74 +456,173 @@ def render_scene_image_clip(
     zoom_factor: float,
     zoom_center_w: float,
     zoom_center_h: float,
-    zoom_direction: str,
+    zoom_direction: str
 ) -> Path:
     """
     Bild (oder schwarz) → 1920x1080,
-    - saubere Fades (fi_start/fi_dur, fo_end_time/fo_dur)
-    - optionaler GPU-Ken-Burns-Zoom
-    - KEIN Text-Overlay (Titel/Screen-Text werden ignoriert)
+    optionaler GPU-Ken-Burns-Zoom + Fade-In/Out + Blur/Darken + Texte.
     """
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    clip_dur = float(clip_dur)
 
-    # Fade-Parameter normalisieren
-    fo_dur = max(0.0, float(fo_dur))
-    fi_start = max(0.0, float(fi_start))
-    fi_dur   = max(0.0, float(fi_dur))
-    fo_start = max(0.0, float(fo_end_time) - fo_dur)
+    has_title = bool(screen_title and screen_title.strip())
+    has_text  = bool(screen_text and screen_text.strip())
 
-    # --- ZOOM-PFAD (GPU) ---
-    zoom_enabled = zoom_factor is not None and float(zoom_factor) > 1.0001 and src_img is not None
+    txt_title = esc_txt(screen_title or "")
+    txt_text  = esc_txt(screen_text or "")
 
-    if zoom_enabled:
-        print(f"   → GPU-Zoom (factor={zoom_factor}, dir={zoom_direction})")
-        render_zoom_scene_gpu(
-            image_path=str(src_img),
-            output_mp4=str(out_path),
-            width=width,
-            height=height,
-            fps=fps,
-            duration=clip_dur,
-            zoom_factor=float(zoom_factor),
-            center_w=float(zoom_center_w or 0.5),
-            center_h=float(zoom_center_h or 0.5),
-            direction=zoom_direction or "in",
-            fi_start=fi_start,
-            fi_dur=fi_dur,
-            fo_end_time=fo_end_time,
-            fo_dur=fo_dur,
-            upscale_factor=2,
-            motion_blur_strength=0.3,
+    fontopt = f":fontfile='{esc_txt(fontfile)}'" if fontfile else ""
+    glow_amount = clamp(glow_amount, 0.0, 1.0)
+
+    col_main = color_to_ffmpeg(color_main, 1.0)
+    col_soft = color_to_ffmpeg(color_main, glow_amount * 0.66)
+
+    # Fades
+    fo_dur = max(0.0, fo_dur)
+    fo_start = max(0.0, fo_end_time - fo_dur)
+    fi_start = max(0.0, fi_start)
+    fi_dur   = max(0.0, fi_dur)
+
+    # Title-Alpha
+    if has_title:
+        t_s = title_start
+        t_d = max(0.1, title_duration)
+        t_in = min(0.5, t_d / 3.0)
+        t_out = min(0.5, t_d / 3.0)
+        t_mid_end = t_s + t_d - t_out
+        alpha_title = (
+            f"if(lt(t,{t_s}),0,"
+            f" if(lt(t,{t_s + t_in}), (t-{t_s})/{t_in},"
+            f"  if(lt(t,{t_mid_end}), 1,"
+            f"   if(lt(t,{t_s + t_d}), ({t_s + t_d}-t)/{t_out}, 0))))"
         )
-        return out_path
+    else:
+        alpha_title = "0"
 
-    # --- FFMPEG-PFAD (kein Zoom) ---
+    # Text-Alpha
+    if has_text:
+        ts = text_start
+        te = text_stop
+        if te < ts:
+            te = ts
+        mid_in = ts + 0.4
+        mid_out = max(ts + 0.4, te - 0.4)
+        alpha_text = (
+            f"if(lt(t,{ts}),0,"
+            f" if(lt(t,{mid_in}), (t-{ts})/0.4,"
+            f"  if(lt(t,{mid_out}), 1,"
+            f"   if(lt(t,{te}), ({te}-t)/0.4, 0))))"
+        )
+    else:
+        alpha_text = "0"
+
+    # Blur/Darken-Fenster
+    if has_title or has_text:
+        bg_start = min(title_start if has_title else text_start,
+                       text_start if has_text else title_start)
+        bg_end   = max(title_start + title_duration if has_title else text_stop,
+                       text_stop if has_text else title_start + title_duration)
+        bg_start = clamp(bg_start, 0.0, clip_dur)
+        bg_end   = clamp(bg_end,   0.0, clip_dur)
+    else:
+        bg_start, bg_end = 0.0, 0.0
+
+    blur_enable = f"between(t,{bg_start},{bg_end})"
+
+    # optionales Vorleuchten
+    if cinematic_text and has_text:
+        pre_start = max(0.0, text_start - 0.25)
+        pre_mid   = text_start
+        pre_end   = text_start + 0.25
+        pre_alpha_text = (
+            f"if(lt(t,{pre_start}),0,"
+            f" if(lt(t,{pre_mid}), (t-{pre_start})/0.25,"
+            f"  if(lt(t,{pre_end}), ({pre_end}-t)/0.25, 0)))"
+        )
+    else:
+        pre_alpha_text = "0"
+
     # Bildquelle
     if src_img and src_img.exists():
         inputs = ["-loop", "1", "-t", f"{clip_dur:.6f}", "-r", str(fps), "-i", str(src_img)]
         base = "[0:v]"
     else:
-        inputs = [
-            "-f", "lavfi",
-            "-t", f"{clip_dur:.6f}",
-            "-i", f"color=c=black:s={width}x{height}:r={fps}",
-        ]
+        inputs = ["-f", "lavfi", "-t", f"{clip_dur:.6f}", "-i",
+                  f"color=c=black:s={width}x{height}:r={fps}"]
         base = "[0:v]"
 
-    # Basis-Filter: Scale + Pad + SAR
-    flt = (
-        f"{base}"
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"format=yuv420p,setsar=1,"
-        f"fade=t=in:st={fi_start:.6f}:d={fi_dur:.6f},"
-        f"fade=t=out:st={fo_start:.6f}:d={fo_dur:.6f}"
+    # Zoom-Logik
+    # --- GPU-ZOOM FAST PATH (PyTorch) ---
+    zoom_enabled = zoom_factor is not None and float(zoom_factor) > 1.0001
+    
+    if zoom_enabled:
+       render_zoom_scene_gpu(
+            image_path=src_img,
+            output_mp4=str(out_path),
+            duration=clip_dur,
+            fps=30,
+            zoom_factor=float(zoom_factor),
+            center_w=float(zoom_center_w or 0.5),
+            center_h=float(zoom_center_h or 0.5),
+            direction=zoom_direction or "in",
+            width=width,
+            height=height,
+            fade_in=1.0,
+            fade_out=1.0,
+            upscale_factor=2,
+            motion_blur_strength=0.3
+        )
+    return
+
+    
+
+
+    # 2. Blur/Darken
+    flt_parts.append(
+        f"[raw]eq=brightness={darken:.3f}:enable='{blur_enable}',"
+        f"gblur=sigma={blur_sigma}:enable='{blur_enable}'[bg]"
     )
 
-    # Optional Darken/Blur global
-    if darken != 0.0 or blur_sigma > 0.0:
-        flt += f",eq=brightness={darken:.3f},gblur=sigma={blur_sigma}"
+    current = "[bg]"
+
+    # 3. optional Vorleuchten Layer (Text)
+    if has_text and cinematic_text:
+        flt_parts.append(
+            f"{current}drawtext=text='{txt_text}':fontsize={text_fontsize}:fontcolor={col_soft}{fontopt}:"
+            f"alpha='{pre_alpha_text}':x=(w-text_w)/2:y=(h-text_h)/2+70:"
+            f"shadowcolor=black:shadowx=2:shadowy=2[pre]"
+        )
+        current = "[pre]"
+
+    # 4. Titel
+    if has_title:
+        flt_parts.append(
+            f"{current}drawtext=text='{txt_title}':fontsize={title_fontsize}:fontcolor={col_main}{fontopt}:"
+            f"alpha='{alpha_title}':x=(w-text_w)/2:y=(h-text_h)/2-60:"
+            f"shadowcolor=black:shadowx=2:shadowy=2[tt1]"
+        )
+        current = "[tt1]"
+        if glow_amount > 0.0:
+            flt_parts.append(
+                f"{current}drawtext=text='{txt_title}':fontsize={title_fontsize}:fontcolor={col_soft}{fontopt}:"
+                f"alpha='{alpha_title}*{glow_amount}':x=(w-text_w)/2:y=(h-text_h)/2-60+1:"
+                f"shadowcolor=black:shadowx=0:shadowy=0[tt2]"
+            )
+            current = "[tt2]"
+
+    # 5. Screentext
+    if has_text:
+        flt_parts.append(
+            f"{current}drawtext=text='{txt_text}':fontsize={text_fontsize}:fontcolor={col_main}{fontopt}:"
+            f"alpha='{alpha_text}':x=(w-text_w)/2:y=(h-text_h)/2+70:"
+            f"shadowcolor=black:shadowx=2:shadowy=2[v]"
+        )
+        current = "[v]"
+    else:
+        flt_parts.append(f"{current}copy[v]")
+        current = "[v]"
+
+    flt = ";".join(flt_parts)
 
     cmd = [
         "ffmpeg", "-y",
@@ -761,11 +637,10 @@ def render_scene_image_clip(
         "-b:v", "8M",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        str(out_path),
+        str(out_path)
     ]
     run(cmd, quiet=False)
     return out_path
-
 
 
 
@@ -902,6 +777,10 @@ class StoryV10:
                 clips.append(outp)
                 durs.append(clip_dur)
                 continue
+            
+            if i < 1:
+                continue
+            
 
             # Intro
             if stype == "intro":
@@ -1155,7 +1034,7 @@ def main():
     ap.add_argument("--fade-in", type=float, default=1.0)
     ap.add_argument("--fade-out", type=float, default=1.0)
 
-    ap.add_argument("--overlay", default="overlay.mp4", help="Overlay-Video/Bild über gesamte Länge")
+    ap.add_argument("--overlay", default=None, help="Overlay-Video/Bild über gesamte Länge")
     ap.add_argument("--overlay-opacity", type=float, default=0.25)
     ap.add_argument("--quality", choices=["hd", "sd"], default="sd", help="Erzeuge SD-Derivat zusätzlich")
 
