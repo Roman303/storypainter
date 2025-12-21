@@ -531,8 +531,8 @@ def main():
 
     CONFIG = {
         # Custom Voice Model
-        "model_path": "/workspace/storypainter/voices/teo",
-        "config_path": "/workspace/storypainter/voices/teo/config.json",
+        "model_path": "/workspace/storypainter/voices/tomhq",
+        "config_path": "/workspace/storypainter/voices/tomhq/config.json",
         
         # Multi-Sample Reference (4 Samples für natürliche Stimme)
         "speaker_wav": [
