@@ -130,41 +130,74 @@ class SceneBasedAudiobookGenerator:
     def prepare_text_for_xtts(self, raw_text: str) -> str:
         t = raw_text.strip()
         
+        # 1. Formatierungszeichen entfernen (unerwünschte)
         remove_chars = ['_', '*', '#', '|', '·', '•', '●', '►', '◄', '~']
         for c in remove_chars:
             t = t.replace(c, '')
         
+        # 2. Unsichtbare/Zero-Width Zeichen entfernen
         zero_width = ["\u200B", "\u200C", "\u200D", "\u2060", "\uFEFF"]
         for z in zero_width:
             t = t.replace(z, "")
         
+        # 3. Anführungszeichen vereinheitlichen
         quote_map = {
-            "«": '"', "»": '"', "„": '"', """: '"', """: '"',
-            "‚": "'", "'": "'", "ʼ": "'", "´": "'", "ˈ": '"',
+            "«": '"', "»": '"', "„": '"', "“": '"', "”": '"',
+            "‚": "'", "‘": "'", "'": "'", "ʼ": "'", "´": "'", "ˈ": "'",
             "‹": '"', "›": '"', "〝": '"', "〞": '"'
         }
         for bad, good in quote_map.items():
             t = t.replace(bad, good)
         
+        # 4. Einsame Anführungszeichen entfernen
         t = re.sub(r'(^"|"$)', '', t)
         t = re.sub(r'\s"(\s|$)', ' ', t)
         t = re.sub(r"\s'(\s|$)", ' ', t)
         
+        # 5. Bindestriche und Gedankenstriche zu Kommas
         dash_variants = ["–", "—", "―", "−", "‑", "⁃", "﹘", "﹣", "－", "ｰ"]
         for d in dash_variants:
             t = t.replace(d, ", ")
         t = re.sub(r'[\-–—]{2,}', ', ', t)
         
+        # 6. Zahlenpunkte für bessere Aussprache
         t = re.sub(r'(\d+)\.(\s|$)', r'\1-tes ', t)
+        
+        # 7. Ellipsen vereinheitlichen
         t = re.sub(r'\.{3,}', '...', t)
         
+        # 8. Nicht-Breaking Spaces zu normalen Leerzeichen
         t = t.replace("\u00A0", " ")
         t = t.replace("\u202F", " ")
-        t = re.sub(r'\s+', ' ', t).strip()
         
-        t = re.sub(r'([.!?])([A-ZÄÖÜ])', r'\1 \2', t)
+        # 9. WICHTIG: Zeilenumbrüche BEHALTEN, aber normalisieren
+        # - Behalte \n\n (Absatzumbrüche) für längere Pausen
+        # - \n alleine bleibt für mittlere Pausen
+        # - Normalisiere nur innerhalb von Zeilen
+        lines = t.split('\n')
+        cleaned_lines = []
         
-        return t.strip()
+        for line in lines:
+            if line.strip():  # Nur nicht-leere Zeilen behalten
+                # Innerhalb der Zeile: Mehrfach-Leerzeichen reduzieren
+                cleaned_line = re.sub(r'[ \t]+', ' ', line.strip())
+                cleaned_lines.append(cleaned_line)
+        
+        # Zeilen wieder zusammenfügen mit originaler Absatzstruktur
+        t = '\n'.join(cleaned_lines)
+        
+        # 10. Fehlende Leerzeichen nach Satzzeichen hinzufügen (wichtig für XTTS!)
+        # Nur wenn nicht bereits ein Leerzeichen oder Zeilenumbruch folgt
+        t = re.sub(r'([.!?…])(?![ \n])', r'\1 ', t)
+        
+        # 11. Optional: SSML-Pausen für spezielle Fälle
+        # Wenn du gezielt lange Pausen einfügen willst:
+        if "[PAUSE_LONG]" in t:
+            t = t.replace("[PAUSE_LONG]", '<break time="800ms"/>')
+        if "[PAUSE_MEDIUM]" in t:
+            t = t.replace("[PAUSE_MEDIUM]", '<break time="400ms"/>')
+        
+        return t
 
     def ensure_whisper_loaded(self):
         if self.whisper is not None:
