@@ -9,6 +9,7 @@ Features:
 - Minimale GPU-CPU Copies
 - Optional CUDA Graphs
 - 100-200 FPS möglich
+- Erweiterter Motion Blur (bis zu 1 Sekunde)
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ import torch.nn.functional as F
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Deque
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -85,23 +87,25 @@ def color_to_ffmpeg(c: str, alpha: float = 1.0) -> str:
 
 
 # ============================================================================
-# ULTRA-OPTIMIZED GPU ZOOM
+# ULTRA-OPTIMIZED GPU ZOOM MIT ERWEITERTEM MOTION BLUR
 # ============================================================================
 
 class CUDAZoomRenderer:
-    """Ultra-optimierte GPU-Zoom-Pipeline mit CUDA Graphs."""
+    """Ultra-optimierte GPU-Zoom-Pipeline mit erweitertem Motion Blur."""
     
     def __init__(
         self,
         device: torch.device,
         width: int,
         height: int,
-        use_cuda_graphs: bool = True
+        use_cuda_graphs: bool = True,
+        motion_blur_duration: float = 1.0  # Dauer in Sekunden
     ):
         self.device = device
         self.width = width
         self.height = height
         self.use_cuda_graphs = use_cuda_graphs and torch.cuda.is_available()
+        self.motion_blur_duration = motion_blur_duration
         self.graph = None
         self.static_input = None
         self.static_output = None
@@ -124,7 +128,7 @@ class CUDAZoomRenderer:
         
         # Intelligenter Upscale
         H_orig, W_orig = img.shape[:2]
-        if max(H_orig, W_orig) < 2400:
+        if max(H_orig, W_orig) < 2500:
             upscale = 2
         else:
             upscale = 1
@@ -154,10 +158,12 @@ class CUDAZoomRenderer:
         cx: int,
         cy: int,
         alpha: float,
-        prev_frame: Optional[torch.Tensor],
-        motion_blur: float
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Rendert einzelnes Frame mit Zoom und Motion Blur."""
+        frame_history: Deque[torch.Tensor],  # Jetzt eine Deque von Frames
+        motion_blur_strength: float,
+        frame_index: int,
+        fps: int
+    ) -> Tuple[torch.Tensor, Deque[torch.Tensor]]:
+        """Rendert einzelnes Frame mit Zoom und erweitertem Motion Blur."""
         
         _, _, H_up, W_up = frame.shape
         
@@ -179,18 +185,57 @@ class CUDAZoomRenderer:
             align_corners=False,
         )
         
-        # Motion Blur (in-place Operationen)
-        if prev_frame is not None and motion_blur > 0.0:
-            zoomed.mul_(1.0 - motion_blur).add_(prev_frame, alpha=motion_blur)
+        # ERWEITERTER MOTION BLUR über mehrere Frames
+        if motion_blur_strength > 0.0 and len(frame_history) > 0:
+            # Berechne wie viele Frames für die gewünschte Dauer
+            max_history_frames = int(self.motion_blur_duration * fps)
+            
+            # Begrenze die History auf die maximale Dauer
+            while len(frame_history) > max_history_frames:
+                frame_history.popleft()
+            
+            # Anzahl der tatsächlich verwendeten Frames
+            num_frames = len(frame_history)
+            
+            # Gewichte berechnen (exponentieller Abfall)
+            weights = torch.zeros(num_frames + 1, device=self.device, dtype=torch.float16)
+            
+            # Aktuelles Frame bekommt höchstes Gewicht
+            weights[0] = 1.0
+            
+            # Historische Frames mit abnehmendem Gewicht
+            decay_rate = 0.7  # Wie schnell das Gewicht abnimmt (0.5 = halbiert pro Frame)
+            for i in range(num_frames):
+                weights[i + 1] = motion_blur_strength * (decay_rate ** (i + 1))
+            
+            # Normalisiere die Gewichte
+            total_weight = weights.sum()
+            if total_weight > 0:
+                weights = weights / total_weight
+                
+                # Gewichtete Summe berechnen
+                blended = torch.zeros_like(zoomed)
+                blended.add_(zoomed, alpha=weights[0])
+                
+                # Historische Frames hinzufügen
+                for i, hist_frame in enumerate(frame_history):
+                    blended.add_(hist_frame, alpha=weights[i + 1])
+                
+                zoomed = blended
         
         # Fade Alpha anwenden (in-place)
         if alpha < 1.0:
             zoomed.mul_(alpha)
         
-        # Neue prev_frame für nächste Iteration (shallow copy)
-        new_prev = zoomed.clone()
+        # Frame zur History hinzufügen
+        frame_history.append(zoomed.clone())
         
-        return zoomed, new_prev
+        # History auf maximal n Frames begrenzen
+        max_frames = int(self.motion_blur_duration * fps) + 1
+        while len(frame_history) > max_frames:
+            frame_history.popleft()
+        
+        return zoomed, frame_history
     
     @torch.inference_mode()
     def render_zoom_sequence(
@@ -207,11 +252,12 @@ class CUDAZoomRenderer:
         fi_dur: float,
         fo_end_time: float,
         fo_dur: float,
-        motion_blur_strength: float = 0.3,
+        motion_blur_strength: float = 0.6,  # Erhöhter Standardwert
     ) -> None:
-        """Haupt-Rendering-Loop mit maximaler Performance."""
+        """Haupt-Rendering-Loop mit erweitertem Motion Blur."""
         
         print(f"   🚀 CUDA-Zoom auf {self.device}")
+        print(f"   ⚡ Motion Blur: {motion_blur_strength:.1f} über {self.motion_blur_duration:.1f}s")
         
         # Bild laden (direkt auf GPU)
         H_up = self.height * 2
@@ -259,7 +305,8 @@ class CUDAZoomRenderer:
         # Pre-allocate CPU buffer für Frames (reduziert Allokationen)
         cpu_buffer = np.empty((self.height, self.width, 3), dtype=np.uint8)
         
-        prev_frame = None
+        # Frame History für Motion Blur
+        frame_history = deque(maxlen=int(self.motion_blur_duration * fps) + 5)
         
         try:
             # CUDA Graph Setup (optional, für Szenen mit vielen Frames)
@@ -268,7 +315,7 @@ class CUDAZoomRenderer:
                 # Warmup
                 for _ in range(3):
                     _ = self.render_frame(
-                        frame, 1.0, cx, cy, 1.0, None, motion_blur_strength
+                        frame, 1.0, cx, cy, 1.0, deque(), 0.0, 0, fps
                     )
                 torch.cuda.synchronize()
             
@@ -295,13 +342,13 @@ class CUDAZoomRenderer:
                 
                 alpha = clamp(alpha, 0.0, 1.0)
                 
-                # Frame rendern (alles auf GPU)
-                zoomed, prev_frame = self.render_frame(
-                    frame, z, cx, cy, alpha, prev_frame, motion_blur_strength
+                # Frame rendern mit erweitertem Motion Blur
+                zoomed, frame_history = self.render_frame(
+                    frame, z, cx, cy, alpha, frame_history, 
+                    motion_blur_strength, i, fps
                 )
                 
                 # GPU -> CPU Transfer (nur 1x pro Frame)
-                # Direkt in pre-allocated buffer schreiben
                 out_gpu = zoomed[0].permute(1, 2, 0).clamp_(0, 1).mul_(255)
                 
                 # Asynchroner Transfer
@@ -316,6 +363,7 @@ class CUDAZoomRenderer:
                 # Progress
                 if (i + 1) % 30 == 0:
                     print(f"   Frame {i+1}/{total_frames} ({100*(i+1)/total_frames:.1f}%)")
+                    print(f"     History: {len(frame_history)} Frames, Zoom: {z:.2f}x")
         
         except BrokenPipeError:
             print("⚠️  FFmpeg pipe broken")
@@ -335,6 +383,7 @@ class CUDAZoomRenderer:
             raise RuntimeError(f"GPU Zoom encoding failed: {stderr}")
         
         print(f"   ✅ {total_frames} Frames gerendert")
+        print(f"   📊 Motion Blur: Über {len(frame_history)} Frames (~{len(frame_history)/fps:.2f}s)")
 
 
 # ============================================================================
@@ -584,7 +633,7 @@ def render_scene_image_clip(
             fi_dur=fi_dur,
             fo_end_time=fo_end_time,
             fo_dur=fo_dur,
-            motion_blur_strength=0.3,
+            motion_blur_strength=0.4,  # Erhöhter Motion Blur
         )
         return out_path
 
@@ -647,6 +696,7 @@ class StoryPipeline:
         fontfile: Optional[str],
         color_main: str,
         use_cuda_graphs: bool = True,
+        motion_blur_duration: float = 1.0,  # Neue Option: Dauer in Sekunden
     ):
         self.images_dir = Path(images_dir)
         self.base_path = Path(base_path)
@@ -661,6 +711,7 @@ class StoryPipeline:
 
         self.fontfile = fontfile
         self.color_main = color_main
+        self.motion_blur_duration = motion_blur_duration
 
         self.title = self.meta.get("title") or self.meta.get("book_info", {}).get("title", "")
         self.author = self.meta.get("author") or self.meta.get("book_info", {}).get("author", "")
@@ -672,7 +723,8 @@ class StoryPipeline:
             device=device,
             width=1920,
             height=1080,
-            use_cuda_graphs=use_cuda_graphs
+            use_cuda_graphs=use_cuda_graphs,
+            motion_blur_duration=motion_blur_duration  # Weitergabe der Dauer
         )
 
         print(f"\n{'='*60}")
@@ -681,6 +733,7 @@ class StoryPipeline:
         print(f"🎬 Szenen: {len(self.scenes_meta)}")
         print(f"🚀 Device: {device}")
         print(f"⚡ CUDA Graphs: {use_cuda_graphs}")
+        print(f"🌀 Motion Blur: {motion_blur_duration:.1f}s Dauer")
         print(f"{'='*60}\n")
 
     def build_scene_clips(
@@ -828,6 +881,7 @@ class StoryPipeline:
 
         return clips, durs
 
+
     def concat_clips(self, clips: List[Path], out_path: Path) -> Path:
         """Konkateniert alle Clips."""
         concat_file = out_path.parent / "concat.txt"
@@ -969,7 +1023,7 @@ def main():
     ap.add_argument("--fade-out", type=float, default=1.0)
 
     ap.add_argument("--overlay", default="overlay.mp4", help="Overlay-Datei")
-    ap.add_argument("--overlay-opacity", type=float, default=0.25)
+    ap.add_argument("--overlay-opacity", type=float, default=0.35)
     ap.add_argument("--quality", choices=["hd", "sd"], default="sd")
 
     ap.add_argument("--font", default=None, help="TTF/OTF Font")
