@@ -22,7 +22,7 @@ from diffusers.schedulers import DPMSolverMultistepScheduler
 class UltraQualitySDXL:
     def __init__(
         self,
-        model_base: str = "stabilityai/stable-diffusion-xl-base-1.0",
+        model_base: str = "Lykon/DreamShaper-XL",
         model_refiner: str = "stabilityai/stable-diffusion-xl-refiner-1.0",
         use_refiner: bool = True,
         output_width: int = 2304,
@@ -79,8 +79,9 @@ class UltraQualitySDXL:
 
         # Optimierter Negative Prompt
         self.default_negative = (
-            "CGI, 3D render, computer graphics, plastic texture, oversaturated colors "
+            "blurry, soft focus, out of focus, low detail, low resolution, "
             "jpeg artifacts, compression artifacts, noisy, grainy, "
+            "temporal noise, flickering, inconsistent lighting, "
             "watermark, logo, signature, text, subtitles, UI elements, "
             "bad composition, cropped, cut off, out of frame, "
             "bad anatomy, extra limbs, deformed hands, "
@@ -323,10 +324,10 @@ def main():
         required=True,
         help="Pfad zum Buch-Verzeichnis mit book_scenes.json"
     )
-    parser.add_argument("--width", type=int, default=2304, help="Bildbreite (default: 2304)")
-    parser.add_argument("--height", type=int, default=1296, help="Bildhöhe (default: 1296)")
-    parser.add_argument("--steps", type=int, default=50, help="Denoising steps (default: 50)")
-    parser.add_argument("--guidance", type=float, default=5.0, help="Guidance scale (default: 5.0)")
+    parser.add_argument("--width", type=int, default=3072)
+    parser.add_argument("--height", type=int, default=1728)
+    parser.add_argument("--steps", type=int, default=36)
+    parser.add_argument("--guidance", type=float, default=4.2)
     parser.add_argument("--no-refiner", action="store_true", help="Refiner deaktivieren")
     
     args = parser.parse_args()
@@ -339,7 +340,7 @@ def main():
     
     # Pipeline initialisieren
     pipeline = UltraQualitySDXL(
-        use_refiner=not args.no_refiner,
+        use_refiner=False,
         output_width=args.width,
         output_height=args.height,
         steps=args.steps,

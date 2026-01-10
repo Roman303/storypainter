@@ -190,8 +190,8 @@ def main():
     parser.add_argument("--scenes", default=None, help="Verzeichnis mit Szenen-Audio (scene_*.wav)")
     parser.add_argument("--output", default=None, help="Output-Verzeichnis")
     parser.add_argument("--pause", type=float, default=4.0, help="Pause zwischen Szenen (Sekunden)")
-    parser.add_argument("--intro-length", type=float, default=10.0, help="Intro-Stille (Sekunden)")
-    parser.add_argument("--outro-length", type=float, default=10.0, help="Outro-Stille (Sekunden)")
+    parser.add_argument("--intro-length", type=float, default=6.0, help="Intro-Stille (Sekunden)")
+    parser.add_argument("--outro-length", type=float, default=24.0, help="Outro-Stille (Sekunden)")
     parser.add_argument("--mp3-bitrate", default="192k", help="MP3 Bitrate")
 
     args = parser.parse_args()
