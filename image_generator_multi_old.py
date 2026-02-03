@@ -21,7 +21,7 @@ from diffusers.schedulers import DPMSolverMultistepScheduler
 class UltraQualitySDXL:
     def __init__(
         self,
-        model_base: str = "Lykon/dreamshaper-xl-1-0",
+        model_base: str = "Lykon/dreamshaper-xl-1-0",  # Default
         model_refiner: str = "stabilityai/stable-diffusion-xl-refiner-1.0",
         use_refiner: bool = False,
         output_width: int = None,
@@ -342,7 +342,7 @@ def process_book(input_path: Path, pipeline: UltraQualitySDXL, force_regenerate:
         seed = scene.get("seed", 42)
         
         # Dateiname bestimmen
-        filename = output_dir / f"image_{int(scene_id):04d}.png"
+        filename = output_dir / f"scene_{int(scene_id):04d}.png"
         
         # ✅ CHECK: Existiert das Bild bereits?
         if filename.exists() and not force_regenerate:
@@ -414,6 +414,8 @@ def process_book(input_path: Path, pipeline: UltraQualitySDXL, force_regenerate:
 def main():
     parser = argparse.ArgumentParser(description="DreamShaper XL Ultra Quality")
     parser.add_argument("--path", type=str, required=True, help="Pfad zum Buch-Ordner")
+    parser.add_argument("--model", type=str, default="Lykon/dreamshaper-xl-1-0", 
+                        help="HuggingFace Model ID (z.B. RunDiffusion/Juggernaut-XL-v9)")
     parser.add_argument("--width", type=int, default=None, help="Bildbreite (default: 1920)")
     parser.add_argument("--height", type=int, default=None, help="Bildhöhe (default: 1080)")
     parser.add_argument("--steps", type=int, default=None, help="Diffusion Steps (default: 42)")
@@ -425,6 +427,7 @@ def main():
     args = parser.parse_args()
 
     pipeline = UltraQualitySDXL(
+        model_base=args.model,
         output_width=args.width,
         output_height=args.height,
         steps=args.steps,
