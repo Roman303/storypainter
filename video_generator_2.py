@@ -1012,7 +1012,7 @@ Beispiele:
     ap.add_argument("--images", default=None, help="Bilder-Ordner")
     ap.add_argument("--metadata", default=None, help="metadata.json Pfad")
     ap.add_argument("--audiobook", default=None, help="Audio-Datei")
-    ap.add_argument("--output", default=None, help="Ausgabe-Ordner")a
+    ap.add_argument("--output", default=None, help="Ausgabe-Ordner")
 
     # Video-Parameter
     ap.add_argument("--fps", type=int, default=30, help="Frames pro Sekunde")
