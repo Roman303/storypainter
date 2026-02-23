@@ -501,12 +501,12 @@ def render_intro_clip(
         "[0:v]"
         f"fade=t=out:st={fade_out_start}:d={fade_out_dur},"
         f"drawtext=text='{txt_title}':fontsize=78:fontcolor={col_main}{fontopt}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2-40:alpha='{alpha_text}':"
+        f"x=(w-text_w)/2:y=(h-text_h)/2-90:alpha='{alpha_text}':"
         f"shadowcolor=black:shadowx=3:shadowy=3,"
         f"drawtext=text='{txt_title}':fontsize=78:fontcolor={col_soft}{fontopt}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2-38:alpha='({alpha_text})*0.45',"
+        f"x=(w-text_w)/2:y=(h-text_h)/2-88:alpha='({alpha_text})*0.45',"
         f"drawtext=text='{txt_author}':fontsize=38:fontcolor={col_main}{fontopt}:"
-        f"x=(w-text_w)/2:y=(h-text_h)/2+55:alpha='{alpha_text}':"
+        f"x=(w-text_w)/2:y=(h-text_h)/2+5:alpha='{alpha_text}':"
         f"shadowcolor=black:shadowx=2:shadowy=2[v]"
     )
 
@@ -675,6 +675,16 @@ class StoryPipeline:
         self.title = self.meta.get("title") or self.meta.get("book_info", {}).get("title", "")
         self.author = self.meta.get("author") or self.meta.get("book_info", {}).get("author", "")
         self.scenes_meta = self.meta.get("scenes", [])
+        
+        # Track intro/outro timing für selective overlay
+        self.intro_end_time = 0.0
+        self.outro_start_time = float('inf')
+        for s in self.scenes_meta:
+            stype = s.get("type", "scene")
+            if stype == "intro":
+                self.intro_end_time = max(self.intro_end_time, float(s.get("end_time", 0)))
+            elif stype == "outro":
+                self.outro_start_time = min(self.outro_start_time, float(s.get("start_time", float('inf'))))
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cuda_renderer = CUDAZoomRenderer(
@@ -863,8 +873,13 @@ class StoryPipeline:
         return clips, durs
 
 
-    def concat_clips(self, clips: List[Path], out_path: Path) -> Path:
-        """Konkateniert alle Clips."""
+    def concat_clips(self, clips: List[Path], out_path: Path, transition_duration: float = 0.0) -> Path:
+        """
+        Konkateniert alle Clips.
+        
+        WICHTIG: xfade wird deaktiviert (zu langsam/hängt bei langen Videos)
+        Nutze stattdessen fade-in/out in den einzelnen Clips.
+        """
         concat_file = out_path.parent / "concat.txt"
         
         with open(concat_file, "w", encoding="utf-8") as f:
@@ -872,6 +887,10 @@ class StoryPipeline:
                 f.write(f"file '{Path(p).resolve().as_posix()}'\n")
 
         print(f"\n🔗 Konkateniere {len(clips)} Clips...")
+        
+        if transition_duration > 0:
+            print(f"⚠️  Transitions deaktiviert (würde hängen bleiben)")
+            print(f"💡 Tipp: Nutze --fade-out für sanfte Übergänge")
         
         cmd = [
             "ffmpeg", "-y",
@@ -900,44 +919,103 @@ class StoryPipeline:
         
         visual = master_video
 
-        # Overlay anwenden
+        # Overlay anwenden - NUR auf Scenes, NICHT auf Intro/Outro
         if overlay_file and overlay_file.exists():
             print(f"\n✨ Overlay wird angewendet: {overlay_file}")
-            ov_out = self.output_dir / "_overlay_master.mp4"
             
-            if overlay_file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
-                ov_inputs = ["-stream_loop", "-1", "-i", str(overlay_file)]
+            # Check ob Intro/Outro vorhanden
+            has_intro_outro = (self.intro_end_time > 0 or self.outro_start_time < float('inf'))
+            
+            if has_intro_outro:
+                print(f"   📍 Intro endet bei: {self.intro_end_time:.1f}s")
+                print(f"   📍 Outro beginnt bei: {self.outro_start_time:.1f}s")
+                print(f"   ⚡ Overlay wird NUR auf Scenes angewendet")
+                
+                ov_out = self.output_dir / "_overlay_master.mp4"
+                
+                # Prepare overlay input
+                if overlay_file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+                    ov_inputs = ["-stream_loop", "-1", "-i", str(overlay_file)]
+                else:
+                    ov_inputs = ["-loop", "1", "-r", str(fps), "-i", str(overlay_file)]
+                
+                # SELECTIVE OVERLAY: Fade in nach Intro, fade out vor Outro
+                fade_duration = 1.0  # Sanftes Ein/Ausblenden
+                
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(master_video),
+                    *ov_inputs,
+                    "-filter_complex",
+                    (
+                        f"[0:v]format=yuv420p[base];"
+                        f"[1:v]scale={width}:{height}:flags=fast_bilinear,format=rgba,"
+                        f"colorchannelmixer=aa={overlay_opacity:.3f},"
+                        # Fade in nach Intro
+                        f"fade=t=in:st={self.intro_end_time:.3f}:d={fade_duration},"
+                        # Fade out vor Outro (wenn vorhanden)
+                        f"fade=t=out:st={max(0, self.outro_start_time - fade_duration):.3f}:d={fade_duration}[ovr];"
+                        f"[base][ovr]overlay=0:0:shortest=1:format=auto[out]"
+                    ),
+                    "-map", "[out]",
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p4",
+                    "-tune", "hq",
+                    "-rc", "vbr",
+                    "-cq", "19",
+                    "-b:v", "0",
+                    "-maxrate", "15M",
+                    "-bufsize", "30M",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    "-threads", "4",
+                    str(ov_out)
+                ]
+                
+                if run(cmd, quiet=False):
+                    visual = ov_out
+                else:
+                    print("⚠️ Overlay fehlgeschlagen, fahre ohne fort")
             else:
-                ov_inputs = ["-loop", "1", "-r", str(fps), "-i", str(overlay_file)]
+                # Kein Intro/Outro - normales Overlay
+                print(f"   ⚡ Overlay wird auf gesamtes Video angewendet")
+                ov_out = self.output_dir / "_overlay_master.mp4"
+                
+                if overlay_file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+                    ov_inputs = ["-stream_loop", "-1", "-i", str(overlay_file)]
+                else:
+                    ov_inputs = ["-loop", "1", "-r", str(fps), "-i", str(overlay_file)]
 
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(master_video),
-                *ov_inputs,
-                "-filter_complex",
-                (
-                    f"[0:v]format=yuv420p[base];"
-                    f"[1:v]scale={width}:{height},format=rgba,"
-                    f"colorchannelmixer=aa={overlay_opacity:.3f}[ovr];"
-                    f"[base][ovr]overlay=0:0:shortest=1[out]"
-                ),
-                "-map", "[out]",
-                "-c:v", "h264_nvenc",
-                "-preset", "p7",
-                "-tune", "hq",
-                "-rc", "vbr",
-                "-cq", "19",
-                "-b:v", "0",
-                "-maxrate", "15M",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                str(ov_out)
-            ]
-            
-            if run(cmd, quiet=False):
-                visual = ov_out
-            else:
-                print("⚠️ Overlay fehlgeschlagen, fahre ohne fort")
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(master_video),
+                    *ov_inputs,
+                    "-filter_complex",
+                    (
+                        f"[0:v]format=yuv420p[base];"
+                        f"[1:v]scale={width}:{height}:flags=fast_bilinear,format=rgba,"
+                        f"colorchannelmixer=aa={overlay_opacity:.3f}[ovr];"
+                        f"[base][ovr]overlay=0:0:shortest=1:format=auto[out]"
+                    ),
+                    "-map", "[out]",
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p4",
+                    "-tune", "hq",
+                    "-rc", "vbr",
+                    "-cq", "19",
+                    "-b:v", "0",
+                    "-maxrate", "15M",
+                    "-bufsize", "30M",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    "-threads", "4",
+                    str(ov_out)
+                ]
+                
+                if run(cmd, quiet=False):
+                    visual = ov_out
+                else:
+                    print("⚠️ Overlay fehlgeschlagen, fahre ohne fort")
         else:
             print("\n🚫 Kein Overlay aktiv")
 
@@ -1047,6 +1125,10 @@ Beispiele:
                     help="CUDA Graphs deaktivieren")
     ap.add_argument("--motion-blur-duration", type=float, default=0.6,
                     help="Motion Blur Dauer in Sekunden (0.5-2.0)")
+    
+    # Übergangseffekte
+    ap.add_argument("--transition-duration", type=float, default=0.5,
+                    help="Dauer der Überblendungen zwischen Szenen in Sekunden (0.0 = keine Übergänge)")
 
     args = ap.parse_args()
 
@@ -1105,6 +1187,7 @@ Beispiele:
     print(f"Intro Fade-In:       {args.intro_fade_in:.1f}s")
     print(f"Intro Fade-Out:      {args.intro_fade_out:.1f}s")
     print(f"Motion Blur:         {args.motion_blur_duration:.1f}s")
+    print(f"Transitions:         {args.transition_duration:.1f}s")
     print(f"FPS:                 {args.fps}")
     print(f"{'='*60}\n")
 
@@ -1120,9 +1203,9 @@ Beispiele:
         intro_fade_out=args.intro_fade_out,
     )
 
-    # Concat
+    # Concat mit Übergängen
     merged = output / "_merged_master.mp4"
-    pipeline.concat_clips(clips, merged)
+    pipeline.concat_clips(clips, merged, transition_duration=args.transition_duration)
 
     # Finalize
     hd, sd = pipeline.finalize(

@@ -20,7 +20,8 @@ from diffusers import StableDiffusionXLPipeline, DiffusionPipeline, EulerAncestr
 from diffusers.schedulers import DPMSolverMultistepScheduler
 
 #############################################
-# SDXL Multi-Model Generator mit CivitAI Support
+# SDXL Multi-Model Generator mit LoRA Support
+# VERSION 2.0 - Erweitert mit echtem LoRA-Support
 #############################################
 
 def check_disk_space(min_gb: float = 5.0):
@@ -240,9 +241,44 @@ def download_civitai_model(version_id: str, model_dir: Path) -> Path:
             output_path.unlink()
         raise
 
-def resolve_model_path(model_input: str) -> dict:
+
+def parse_lora_input(lora_string: str) -> dict:
+    """
+    Parst LoRA Input String
+    Format: "URL_oder_Pfad:Weight" oder nur "URL_oder_Pfad"
+    
+    Returns:
+        dict mit 'input' (Original-String) und 'weight'
+    """
+    parts = lora_string.rsplit(':', 1)
+    
+    if len(parts) == 2:
+        # Prüfe ob der letzte Teil ein valides Gewicht ist
+        try:
+            weight = float(parts[1])
+            # Valides Gewicht - verwende ersten Teil als Pfad
+            return {
+                'input': parts[0],
+                'weight': weight
+            }
+        except ValueError:
+            # Kein valides Weight, behandle gesamten String als Pfad
+            pass
+    
+    # Kein Weight angegeben oder kein valides Weight
+    return {
+        'input': lora_string,
+        'weight': 1.0
+    }
+
+
+def resolve_model_path(model_input: str, force_type: str = None) -> dict:
     """
     Löst Model-Input auf und gibt Dict mit Typ und Pfad zurück
+    
+    Args:
+        model_input: URL, Pfad oder HuggingFace ID
+        force_type: Optional - erzwinge einen bestimmten Typ ('lora', 'checkpoint_sdxl', etc.)
     """
     
     # Check 1: CivitAI URL
@@ -264,16 +300,19 @@ def resolve_model_path(model_input: str) -> dict:
         model_dir = Path("/workspace/models/civitai")
         local_path = download_civitai_model(civitai_info['version_id'], model_dir)
         
-        # Model-Typ erkennen
-        filename = str(local_path).lower()
-        if 'lora' in filename:
-            model_type = 'lora'
-        elif 'embedding' in filename or '.pt' in filename:
-            model_type = 'embedding'
-        elif '.safetensors' in filename or '.ckpt' in filename:
-            model_type = 'checkpoint_sdxl'
+        # Model-Typ erkennen (force_type hat Priorität)
+        if force_type:
+            model_type = force_type
         else:
-            model_type = 'checkpoint_sdxl'
+            filename = str(local_path).lower()
+            if 'lora' in filename:
+                model_type = 'lora'
+            elif 'embedding' in filename or '.pt' in filename:
+                model_type = 'embedding'
+            elif '.safetensors' in filename or '.ckpt' in filename:
+                model_type = 'checkpoint_sdxl'
+            else:
+                model_type = 'checkpoint_sdxl'
         
         return {
             'type': model_type,
@@ -284,15 +323,18 @@ def resolve_model_path(model_input: str) -> dict:
     
     # Check 2: Lokaler Pfad
     if Path(model_input).exists():
-        filename = model_input.lower()
-        if 'lora' in filename:
-            model_type = 'lora'
-        elif 'embedding' in filename or '.pt' in filename:
-            model_type = 'embedding'
-        elif '.safetensors' in filename or '.ckpt' in filename:
-            model_type = 'checkpoint_sdxl'
+        if force_type:
+            model_type = force_type
         else:
-            model_type = 'huggingface'
+            filename = model_input.lower()
+            if 'lora' in filename:
+                model_type = 'lora'
+            elif 'embedding' in filename or '.pt' in filename:
+                model_type = 'embedding'
+            elif '.safetensors' in filename or '.ckpt' in filename:
+                model_type = 'checkpoint_sdxl'
+            else:
+                model_type = 'huggingface'
             
         return {
             'type': model_type,
@@ -308,14 +350,16 @@ def resolve_model_path(model_input: str) -> dict:
         return {
             'type': 'huggingface',
             'path': model_input,
-            'source': 'huggingface'
+            'source': 'huggingface',
+            'filename': model_input.split('/')[-1]
         }
     
     # Default
     return {
         'type': 'huggingface',
         'path': model_input,
-        'source': 'huggingface'
+        'source': 'huggingface',
+        'filename': model_input
     }
 
 
@@ -323,7 +367,8 @@ class UltraQualitySDXL:
     def __init__(
         self,
         model_info: dict = None,
-        model_refiner: str = None,  # Kein Refiner default für Speicher
+        lora_list: list = None,  # ✨ NEU: Liste von LoRA-Dicts
+        model_refiner: str = None,
         use_refiner: bool = False,
         output_width: int = None,
         output_height: int = None,
@@ -337,9 +382,16 @@ class UltraQualitySDXL:
         if model_info is None:
             model_info = {'type': 'huggingface', 'path': base_model}
         
+        self.lora_list = lora_list or []
+        
         print(f"🚀 Initialisiere Pipeline")
         print(f"   Model: {model_info.get('filename', model_info['path'])}")
         print(f"   Typ: {model_info['type']}")
+        
+        if self.lora_list:
+            print(f"   LoRAs: {len(self.lora_list)}")
+            for i, lora in enumerate(self.lora_list, 1):
+                print(f"      {i}. {lora.get('filename', 'unknown')} @ weight {lora.get('weight', 1.0)}")
 
         if not torch.cuda.is_available():
             raise RuntimeError("❌ Keine CUDA-GPU gefunden!")
@@ -350,7 +402,7 @@ class UltraQualitySDXL:
         # ✨ OPTIMIERTE DEFAULTS FÜR SPEICHER
         self.output_width = output_width if output_width is not None else 1920
         self.output_height = output_height if output_height is not None else 1080
-        self.steps = steps if steps is not None else 35  # Weniger Steps für Speed
+        self.steps = steps if steps is not None else 35
         self.guidance = guidance if guidance is not None else 7.0
         self.scheduler_type = scheduler if scheduler is not None else "euler_a"
         self.use_refiner = bool(use_refiner)
@@ -459,7 +511,8 @@ class UltraQualitySDXL:
                     ).to(self.device)
             
             elif model_info['type'] == 'lora':
-                # LoRA
+                # Einzelnes LoRA als --model übergeben (Legacy Support)
+                print(f"⚠️  LoRA als --model übergeben - lade auf Basis-SDXL")
                 self.base = DiffusionPipeline.from_pretrained(
                     self.base_model,
                     torch_dtype=torch.float16,
@@ -469,11 +522,15 @@ class UltraQualitySDXL:
                     low_cpu_mem_usage=True,
                 ).to(self.device)
                 
-                try:
-                    self.base.load_lora_weights(model_info['path'])
-                    print(f"✅ LoRA geladen")
-                except:
-                    print(f"⚠️  LoRA konnte nicht geladen werden")
+                # Füge es zur LoRA-Liste hinzu
+                if not self.lora_list:
+                    self.lora_list = []
+                self.lora_list.insert(0, {
+                    'path': model_info['path'],
+                    'weight': 1.0,
+                    'filename': model_info.get('filename', Path(model_info['path']).name)
+                })
+                print(f"✅ Basis-Model geladen, LoRA wird gleich geladen...")
             
             else:
                 # Fallback
@@ -489,6 +546,77 @@ class UltraQualitySDXL:
         except Exception as e:
             print(f"❌ Kritischer Fehler beim Modelladen: {e}")
             raise
+
+        # ✨ LORAS LADEN (NEU!)
+        if self.lora_list:
+            print(f"🎨 Lade {len(self.lora_list)} LoRA(s)...")
+            
+            loaded_loras = []
+            
+            for i, lora_info in enumerate(self.lora_list, 1):
+                try:
+                    lora_path = lora_info['path']
+                    lora_weight = lora_info.get('weight', 1.0)
+                    lora_name = lora_info.get('filename', Path(lora_path).name)
+                    
+                    print(f"   [{i}/{len(self.lora_list)}] Lade: {lora_name}")
+                    print(f"       Gewicht: {lora_weight}")
+                    
+                    # Adapter-Name für dieses LoRA
+                    adapter_name = f"lora_{i}"
+                    
+                    # LoRA laden
+                    self.base.load_lora_weights(
+                        lora_path,
+                        adapter_name=adapter_name
+                    )
+                    
+                    loaded_loras.append({
+                        'adapter_name': adapter_name,
+                        'weight': lora_weight,
+                        'filename': lora_name
+                    })
+                    
+                    print(f"   ✅ LoRA {i} geladen als '{adapter_name}'")
+                    
+                except Exception as e:
+                    print(f"   ❌ LoRA {i} konnte nicht geladen werden: {e}")
+                    print(f"      Überspringe dieses LoRA...")
+                    continue
+            
+            # Wenn mehrere LoRAs geladen wurden, alle aktivieren mit Gewichten
+            if len(loaded_loras) > 0:
+                if len(loaded_loras) > 1:
+                    adapter_names = [lora['adapter_name'] for lora in loaded_loras]
+                    adapter_weights = [lora['weight'] for lora in loaded_loras]
+                    
+                    try:
+                        self.base.set_adapters(adapter_names, adapter_weights)
+                        print(f"✅ Alle {len(loaded_loras)} LoRAs aktiviert mit Gewichten:")
+                        for lora in loaded_loras:
+                            print(f"   • {lora['filename']}: {lora['weight']}")
+                    except Exception as e:
+                        print(f"⚠️  Multi-LoRA Gewichtung fehlgeschlagen: {e}")
+                        print(f"   Verwende Standard-Aktivierung...")
+                        # Fallback: Nur erstes LoRA aktivieren
+                        try:
+                            self.base.set_adapters([loaded_loras[0]['adapter_name']])
+                            print(f"✅ Verwende nur erstes LoRA: {loaded_loras[0]['filename']}")
+                        except:
+                            pass
+                else:
+                    # Nur ein LoRA
+                    try:
+                        # Bei einzelnem LoRA können wir auch fuse_lora() verwenden für Performance
+                        # Aber das ist optional - set_adapters funktioniert auch
+                        self.base.set_adapters([loaded_loras[0]['adapter_name']])
+                        print(f"✅ LoRA aktiviert: {loaded_loras[0]['filename']} @ {loaded_loras[0]['weight']}")
+                        
+                        # Optional: LoRA für bessere Performance einbrennen
+                        # self.base.fuse_lora(lora_scale=loaded_loras[0]['weight'])
+                        # print(f"   ℹ️  LoRA eingebrannt für optimale Performance")
+                    except Exception as e:
+                        print(f"⚠️  LoRA-Aktivierung fehlgeschlagen: {e}")
 
         # 📊 SCHEDULER
         if self.scheduler_type == "euler_a":
@@ -657,6 +785,10 @@ def process_book(input_path: Path, pipeline: UltraQualitySDXL, force_regenerate:
     print(f"📊 SZENEN: {len(scenes)}")
     print(f"⚙️  SETTINGS: {pipeline.output_width}x{pipeline.output_height} | {pipeline.steps} steps | CFG {pipeline.guidance}")
     print(f"🎭 MODEL: {pipeline.model_info.get('filename', pipeline.model_info['path'])}")
+    if pipeline.lora_list:
+        print(f"🎨 LORAs: {len(pipeline.lora_list)}")
+        for i, lora in enumerate(pipeline.lora_list, 1):
+            print(f"   {i}. {lora.get('filename', 'unknown')} @ {lora.get('weight', 1.0)}")
     print(f"💾 VRAM: {torch.cuda.memory_allocated() / 1024**3:.1f} GB")
     if force_regenerate:
         print(f"🔄 MODUS: Überschreibe existierende Bilder")
@@ -694,8 +826,8 @@ def process_book(input_path: Path, pipeline: UltraQualitySDXL, force_regenerate:
         print("="*80)
         print(f"🖼️  SZENE {i}/{len(scenes)} (ID: {scene_id})")
         print("-"*80)
-        if len(full_prompt) > 80:
-            print(f"📝 PROMPT: {full_prompt[:80]}...")
+        if len(full_prompt) > 180:
+            print(f"📝 PROMPT: {full_prompt[:180]}...")
         else:
             print(f"📝 PROMPT: {full_prompt}")
         print(f"🎲 SEED: {seed}")
@@ -773,22 +905,62 @@ def cleanup_old_models(max_models: int = 10):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SDXL Generator mit Speichermanagement")
-    parser.add_argument("--path", type=str, required=True, help="Pfad zum Buch-Ordner")
-    parser.add_argument("--model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0", 
-                        help="HuggingFace Model ID oder CivitAI URL")
-    parser.add_argument("--width", type=int, default=None, help="Bildbreite (default: auto)")
-    parser.add_argument("--height", type=int, default=None, help="Bildhöhe (default: auto)")
-    parser.add_argument("--steps", type=int, default=None, help="Diffusion Steps (default: 25)")
-    parser.add_argument("--guidance", type=float, default=None, help="CFG Scale (default: 7.0)")
-    parser.add_argument("--scheduler", type=str, default=None, choices=["dpm++", "euler_a"], 
-                        help="Scheduler (default: euler_a)")
-    parser.add_argument("--refiner", action="store_true", help="SDXL Refiner aktivieren")
-    parser.add_argument("--force", action="store_true", help="Existierende Bilder überschreiben")
-    parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-xl-base-1.0", 
-                        help="Basis Model für LoRAs")
-    parser.add_argument("--cleanup", action="store_true", help="Alte Modelle aufräumen vor Start")
-    parser.add_argument("--low-memory", action="store_true", help="Aktiviere Low-Memory Mode")
+    parser = argparse.ArgumentParser(
+        description="SDXL Generator mit LoRA-Support v2.0",
+        epilog="""
+BEISPIELE:
+  
+  Nur Checkpoint:
+    %(prog)s --path ./input --model "Lykon/dreamshaper-xl-1-0"
+  
+  Checkpoint + LoRA:
+    %(prog)s --path ./input --model "Lykon/dreamshaper-xl-1-0" \\
+             --lora "https://civitai.com/models/123?modelVersionId=456:0.8"
+  
+  Mehrere LoRAs:
+    %(prog)s --path ./input --model "Lykon/dreamshaper-xl-1-0" \\
+             --lora "url1:1.0" --lora "url2:0.7"
+  
+  Basis-SDXL + LoRA:
+    %(prog)s --path ./input --lora "/path/to/lora.safetensors:0.9"
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument("--path", type=str, required=True, 
+                       help="Pfad zum Buch-Ordner")
+    parser.add_argument("--model", type=str, 
+                       default="stabilityai/stable-diffusion-xl-base-1.0", 
+                       help="HuggingFace Model ID oder CivitAI URL (Checkpoint)")
+    
+    # ✨ NEU: LoRA Parameter
+    parser.add_argument("--lora", type=str, action='append', dest='loras',
+                       help="LoRA URL oder Pfad, optional mit :WEIGHT (z.B. 'url:0.8'). "
+                            "Kann mehrfach verwendet werden für multiple LoRAs.")
+    
+    parser.add_argument("--width", type=int, default=None, 
+                       help="Bildbreite (default: auto)")
+    parser.add_argument("--height", type=int, default=None, 
+                       help="Bildhöhe (default: auto)")
+    parser.add_argument("--steps", type=int, default=None, 
+                       help="Diffusion Steps (default: 35)")
+    parser.add_argument("--guidance", type=float, default=None, 
+                       help="CFG Scale (default: 7.0)")
+    parser.add_argument("--scheduler", type=str, default=None, 
+                       choices=["dpm++", "euler_a"], 
+                       help="Scheduler (default: euler_a)")
+    parser.add_argument("--refiner", action="store_true", 
+                       help="SDXL Refiner aktivieren")
+    parser.add_argument("--force", action="store_true", 
+                       help="Existierende Bilder überschreiben")
+    parser.add_argument("--base-model", type=str, 
+                       default="stabilityai/stable-diffusion-xl-base-1.0", 
+                       help="Basis Model für LoRAs")
+    parser.add_argument("--cleanup", action="store_true", 
+                       help="Alte Modelle aufräumen vor Start")
+    parser.add_argument("--low-memory", action="store_true", 
+                       help="Aktiviere Low-Memory Mode")
+    
     args = parser.parse_args()
 
     # Aufräumen falls gewünscht
@@ -798,24 +970,48 @@ def main():
     # Speicherplatz prüfen
     check_disk_space(5)
     
-    # Model Info
+    # Model Info auflösen
     model_info = resolve_model_path(args.model)
-    print(f"📁 Model Info: Typ={model_info['type']}")
+    print(f"📁 Model Info: Typ={model_info['type']}, Source={model_info.get('source', 'unknown')}")
+    
+    # ✨ LoRAs verarbeiten (NEU!)
+    lora_list = []
+    if args.loras:
+        print(f"\n🎨 Verarbeite {len(args.loras)} LoRA Input(s)...")
+        
+        for lora_string in args.loras:
+            # Parse Input (extrahiert Pfad und Weight)
+            lora_parsed = parse_lora_input(lora_string)
+            
+            # LoRA-Pfad auflösen (Download von CivitAI falls nötig)
+            try:
+                lora_info = resolve_model_path(lora_parsed['input'], force_type='lora')
+                lora_info['weight'] = lora_parsed['weight']
+                lora_list.append(lora_info)
+                print(f"   ✅ {lora_info.get('filename', 'unknown')} @ weight {lora_info['weight']}")
+            except Exception as e:
+                print(f"   ❌ LoRA konnte nicht aufgelöst werden: {e}")
+                print(f"      Überspringe: {lora_string}")
+        
+        if not lora_list:
+            print(f"⚠️  Keine LoRAs konnten geladen werden!")
     
     # Low-Memory Mode
     if args.low_memory:
-        print("🔧 Low-Memory Mode aktiviert")
+        print("\n🔧 Low-Memory Mode aktiviert")
         if args.width is None:
             args.width = 896
         if args.height is None:
             args.height = 512
         if args.steps is None:
             args.steps = 20
-        if not args.refiner:  # Refiner deaktivieren im Low-Memory Mode
+        if not args.refiner:
             args.refiner = False
     
+    # Pipeline erstellen
     pipeline = UltraQualitySDXL(
         model_info=model_info,
+        lora_list=lora_list,  # ✨ NEU!
         base_model=args.base_model,
         output_width=args.width,
         output_height=args.height,
@@ -825,6 +1021,7 @@ def main():
         use_refiner=args.refiner,
     )
 
+    # Bilder generieren
     process_book(Path(args.path), pipeline, force_regenerate=args.force)
 
 
