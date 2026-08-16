@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Deque
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 
 # ============================================================================
@@ -278,6 +279,26 @@ class CUDAZoomRenderer:
         
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         
+        # ----------------------------------------------------------------
+        # WICHTIG: stderr in Background-Thread leeren, damit der OS-Pipe-
+        # Puffer (~64 KB) bei langen Szenen nicht voll läuft und FFmpeg
+        # (sowie den Python-Schreibloop) blockiert → kein Deadlock mehr.
+        # ----------------------------------------------------------------
+        stderr_chunks: list[bytes] = []
+        
+        def _drain_stderr():
+            try:
+                while True:
+                    chunk = proc.stderr.read(65536)
+                    if not chunk:
+                        break
+                    stderr_chunks.append(chunk)
+            except Exception:
+                pass
+        
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+        
         cpu_buffer = np.empty((self.height, self.width, 3), dtype=np.uint8)
         frame_history = deque(maxlen=int(self.motion_blur_duration * fps) + 5)
         
@@ -332,13 +353,15 @@ class CUDAZoomRenderer:
         finally:
             try:
                 proc.stdin.close()
-            except:
+            except Exception:
                 pass
         
+        # Warten bis stderr vollständig gelesen und FFmpeg beendet ist
+        stderr_thread.join(timeout=30)
         proc.wait()
         
         if proc.returncode != 0:
-            stderr = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
+            stderr = b"".join(stderr_chunks).decode("utf-8", "ignore") if stderr_chunks else ""
             raise RuntimeError(f"GPU Zoom encoding failed: {stderr}")
         
         print(f"   ✅ {total_frames} Frames gerendert")
@@ -940,7 +963,10 @@ class StoryPipeline:
                     ov_inputs = ["-loop", "1", "-r", str(fps), "-i", str(overlay_file)]
                 
                 # SELECTIVE OVERLAY: Fade in nach Intro, fade out vor Outro
-                fade_duration = 1.0  # Sanftes Ein/Ausblenden
+                # PERFORMANCE: blend=addition bleibt in YUV – kein RGBA-Roundtrip.
+                # Fade zu Schwarz = Fade-Out bei additivem Blend → identisches Ergebnis.
+                fade_duration = 1.0
+                outro_fade_st = max(0.0, self.outro_start_time - fade_duration)
                 
                 cmd = [
                     "ffmpeg", "-y",
@@ -948,27 +974,19 @@ class StoryPipeline:
                     *ov_inputs,
                     "-filter_complex",
                     (
-                        f"[0:v]format=yuv420p[base];"
-                        f"[1:v]scale={width}:{height}:flags=fast_bilinear,format=rgba,"
-                        f"colorchannelmixer=aa={overlay_opacity:.3f},"
-                        # Fade in nach Intro
+                        f"[1:v]scale={width}:{height}:flags=fast_bilinear,"
                         f"fade=t=in:st={self.intro_end_time:.3f}:d={fade_duration},"
-                        # Fade out vor Outro (wenn vorhanden)
-                        f"fade=t=out:st={max(0, self.outro_start_time - fade_duration):.3f}:d={fade_duration}[ovr];"
-                        f"[base][ovr]overlay=0:0:shortest=1:format=auto[out]"
+                        f"fade=t=out:st={outro_fade_st:.3f}:d={fade_duration}[ovr];"
+                        f"[0:v][ovr]blend=all_mode=addition:all_opacity={overlay_opacity:.3f}:shortest=1[out]"
                     ),
                     "-map", "[out]",
                     "-c:v", "h264_nvenc",
-                    "-preset", "p4",
-                    "-tune", "hq",
-                    "-rc", "vbr",
-                    "-cq", "19",
-                    "-b:v", "0",
-                    "-maxrate", "15M",
-                    "-bufsize", "30M",
+                    "-preset", "p1",          # schnellstes NVENC-Preset
+                    "-rc", "constqp",          # kein Bitrate-Overhead
+                    "-qp", "19",
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
-                    "-threads", "4",
+                    "-threads", "0",           # alle CPU-Kerne für Mux/Demux
                     str(ov_out)
                 ]
                 
@@ -992,23 +1010,18 @@ class StoryPipeline:
                     *ov_inputs,
                     "-filter_complex",
                     (
-                        f"[0:v]format=yuv420p[base];"
-                        f"[1:v]scale={width}:{height}:flags=fast_bilinear,format=rgba,"
-                        f"colorchannelmixer=aa={overlay_opacity:.3f}[ovr];"
-                        f"[base][ovr]overlay=0:0:shortest=1:format=auto[out]"
+                        # PERFORMANCE: blend=addition bleibt in YUV – kein RGBA-Roundtrip.
+                        f"[1:v]scale={width}:{height}:flags=fast_bilinear[ovr];"
+                        f"[0:v][ovr]blend=all_mode=addition:all_opacity={overlay_opacity:.3f}:shortest=1[out]"
                     ),
                     "-map", "[out]",
                     "-c:v", "h264_nvenc",
-                    "-preset", "p4",
-                    "-tune", "hq",
-                    "-rc", "vbr",
-                    "-cq", "19",
-                    "-b:v", "0",
-                    "-maxrate", "15M",
-                    "-bufsize", "30M",
+                    "-preset", "p1",          # schnellstes NVENC-Preset
+                    "-rc", "constqp",          # kein Bitrate-Overhead
+                    "-qp", "19",
                     "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
-                    "-threads", "4",
+                    "-threads", "0",           # alle CPU-Kerne
                     str(ov_out)
                 ]
                 

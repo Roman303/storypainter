@@ -20,6 +20,7 @@ import json
 import time
 import argparse
 import re
+import soundfile as sf
 from pathlib import Path
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
@@ -31,6 +32,8 @@ class SceneBasedAudiobookGenerator:
         self.output_dir = Path(config["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.progress_file = self.output_dir / "progress.json"
+        self.gpt_cond_latent = None
+        self.speaker_embedding = None
         
     def load_progress(self):
         if self.progress_file.exists():
@@ -321,17 +324,32 @@ class SceneBasedAudiobookGenerator:
         output_file = self.output_dir / f"{base_name}.wav"
 
         try:
-            tts.tts_to_file(
-                text=text,
-                speaker_wav=self.config["speaker_wav"],
-                language=self.config["language"],
-                file_path=str(output_file),
-                temperature=temperature,
-                repetition_penalty=self.config.get("repetition_penalty", 1.45),
-                top_p=self.config.get("top_p", 0.93),
-                top_k=self.config.get("top_k", 35),
-                speed=self.config.get("speed", 1.0),
-            )
+            if self.gpt_cond_latent is not None and self.speaker_embedding is not None:
+                model = tts.synthesizer.tts_model
+                out = model.inference(
+                    text=text,
+                    language=self.config["language"],
+                    gpt_cond_latent=self.gpt_cond_latent,
+                    speaker_embedding=self.speaker_embedding,
+                    temperature=temperature,
+                    repetition_penalty=self.config.get("repetition_penalty", 1.45),
+                    top_p=self.config.get("top_p", 0.93),
+                    top_k=self.config.get("top_k", 35),
+                    speed=self.config.get("speed", 1.0),
+                )
+                sf.write(str(output_file), out["wav"], 24000)
+            else:
+                tts.tts_to_file(
+                    text=text,
+                    speaker_wav=self.config["speaker_wav"],
+                    language=self.config["language"],
+                    file_path=str(output_file),
+                    temperature=temperature,
+                    repetition_penalty=self.config.get("repetition_penalty", 1.45),
+                    top_p=self.config.get("top_p", 0.93),
+                    top_k=self.config.get("top_k", 35),
+                    speed=self.config.get("speed", 1.0),
+                )
             return str(output_file)
         except Exception as e:
             print(f"    ⚠️ Fehler bei TTS: {e}")
@@ -423,6 +441,21 @@ class SceneBasedAudiobookGenerator:
             print(f"   ✅ XTTS auf GPU {gpu_id}: {gpu_name} ({vram:.1f} GB VRAM)")
         else:
             print("   ✅ XTTS auf CPU")
+
+        # Latents einmal vorberechnen → kein Re-Encoding bei jedem Chunk
+        print("\n🔧 Berechne Speaker-Latents (einmalig)...")
+        try:
+            speaker_wav = self.config["speaker_wav"]
+            gpt_cond_latent, speaker_embedding = tts.synthesizer.tts_model.get_conditioning_latents(
+                audio_path=speaker_wav if isinstance(speaker_wav, list) else [speaker_wav]
+            )
+            self.gpt_cond_latent = gpt_cond_latent
+            self.speaker_embedding = speaker_embedding
+            print("   ✅ Latents gecacht - kein Re-Encoding pro Chunk mehr!")
+        except Exception as e:
+            print(f"   ⚠️ Latent-Cache fehlgeschlagen, nutze Fallback: {e}")
+            self.gpt_cond_latent = None
+            self.speaker_embedding = None
 
         print(f"\n📖 Lade Szenen aus: {self.config['scenes_file']}")
         with open(self.config["scenes_file"], 'r', encoding='utf-8') as f:
@@ -526,7 +559,6 @@ class SceneBasedAudiobookGenerator:
 
                     if success:
                         try:
-                            import soundfile as sf
                             audio_dur = sf.info(str(base_file)).duration
                             rtf = duration / audio_dur if audio_dur > 0 else 0
                             print(f"           ✅ Fertig in {duration:.1f}s | Audio: {audio_dur:.1f}s | RTF: {rtf:.2f}")

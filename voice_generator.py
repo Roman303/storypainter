@@ -1,31 +1,21 @@
 #!/usr/bin/env python3
 """
-Hörbuch-Generator V4 - Production Ready
+Hörbuch-Generator V6 - Production Ready
 - Multi-Sample Support (4-6 Samples für natürliche Stimme)
-- Original-Backup als _a.wav
-- Kompaktes QC-Logging
 - RTX 4070/4090 optimiert
-- Whisper large-v3 für Deutsch
+- Kein Whisper/QC - maximale Geschwindigkeit
+- Latent-Cache: Speaker-Embeddings werden einmal vorberechnet → kein Re-Encoding pro Chunk
 """
 
 import os
-os.environ["ORT_DISABLE_ALL_GPU"] = "1"
-os.environ["ORT_BACKEND"] = "CPU"
-os.environ["ORT_PROVIDER"] = "CPU"
-os.environ["FWHISPER_BACKEND"] = "ct2"
 os.environ["COQUI_TOS_AGREED"] = "1"
 
 import sys
 import json
 import time
 import argparse
-import difflib
 import re
 from pathlib import Path
-from pydub import AudioSegment
-import librosa
-import soundfile as sf
-import numpy as np
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
 
@@ -36,8 +26,8 @@ class SceneBasedAudiobookGenerator:
         self.output_dir = Path(config["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.progress_file = self.output_dir / "progress.json"
-        self.qc_problems_file = self.output_dir / "qc_problems.json"
-        self.whisper = None
+        self.gpt_cond_latent = None
+        self.speaker_embedding = None
         
     def load_progress(self):
         if self.progress_file.exists():
@@ -199,74 +189,6 @@ class SceneBasedAudiobookGenerator:
         
         return t
 
-    def ensure_whisper_loaded(self):
-        if self.whisper is not None:
-            return
-
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError:
-            print("   ⚠️ faster-whisper nicht installiert. QC wird deaktiviert.")
-            self.whisper = None
-            return
-
-        device = self.config.get("whisper_device", "cpu")
-        model_name = self.config.get("whisper_model_name", "large-v3")
-        compute_type = self.config.get("whisper_compute_type", "int8")
-
-        print(f"\n🔥 Lade Whisper QC-Modell ({model_name}, device={device}, compute_type={compute_type})...")
-        try:
-            self.whisper = WhisperModel(model_name, device=device, compute_type=compute_type)
-            print(f"   ✅ Whisper QC-Modell geladen")
-        except Exception as e:
-            print(f"   ⚠️ Konnte Whisper QC-Modell nicht laden: {e}")
-            self.whisper = None
-
-    def transcribe_with_whisper(self, wav_path: str) -> str:
-        if self.whisper is None:
-            return ""
-        segments, _ = self.whisper.transcribe(wav_path, language="de")
-        return " ".join([s.text for s in segments])
-
-    def normalize_text_for_eval(self, text: str) -> str:
-        if not text:
-            return ""
-        t = text.lower()
-        t = re.sub(r"[^0-9a-zäöüß]+", " ", t)
-        t = re.sub(r"\s+", " ", t).strip()
-        return t
-
-    def compute_cer(self, ref: str, hyp: str) -> float:
-        ref = ref or ""
-        hyp = hyp or ""
-        if not ref and not hyp:
-            return 0.0
-        if not ref and hyp:
-            return 1.0
-        matcher = difflib.SequenceMatcher(None, ref, hyp)
-        return 1.0 - matcher.ratio()
-
-    def log_qc_problem(self, scene_id, chunk_id, cer_value, attempts):
-        """KOMPAKTES QC-Logging - nur Dateiname + CER"""
-        entry = {
-            "file": f"scene_{scene_id:04d}_chunk_{chunk_id:03d}.wav",
-            "cer": round(cer_value, 3),
-            "attempts": attempts
-        }
-
-        data = []
-        if self.qc_problems_file.exists():
-            try:
-                with open(self.qc_problems_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = []
-
-        data.append(entry)
-
-        with open(self.qc_problems_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-
     def remove_long_silences(self, wav_path, max_silence_sec=1.0):
         """
         Entfernt zuverlässig jede Stille länger als max_silence_sec.
@@ -312,79 +234,43 @@ class SceneBasedAudiobookGenerator:
         output_file = self.output_dir / f"{base_name}.wav"
 
         try:
-            tts.tts_to_file(
-                text=text,
-                speaker_wav=self.config["speaker_wav"],
-                language=self.config["language"],
-                file_path=str(output_file),
-                temperature=temperature,
-                repetition_penalty=self.config.get("repetition_penalty", 1.45),
-                speed=1.0
-            )
+            # Latent-Cache nutzen wenn verfügbar (kein Re-Encoding pro Chunk)
+            if self.gpt_cond_latent is not None and self.speaker_embedding is not None:
+                model = tts.synthesizer.tts_model
+                out = model.inference(
+                    text=text,
+                    language=self.config["language"],
+                    gpt_cond_latent=self.gpt_cond_latent,
+                    speaker_embedding=self.speaker_embedding,
+                    temperature=temperature,
+                    repetition_penalty=self.config.get("repetition_penalty", 1.45),
+                    speed=1.0,
+                )
+                import soundfile as sf
+                sf.write(str(output_file), out["wav"], 24000)
+            else:
+                # Fallback: normaler tts_to_file Call
+                tts.tts_to_file(
+                    text=text,
+                    speaker_wav=self.config["speaker_wav"],
+                    language=self.config["language"],
+                    file_path=str(output_file),
+                    temperature=temperature,
+                    repetition_penalty=self.config.get("repetition_penalty", 1.45),
+                    speed=1.0,
+                )
             return str(output_file)
         except Exception as e:
             print(f"    ⚠️ Fehler bei TTS: {e}")
             return None
 
-    def backup_original(self, wav_path):
-        """Sichert Original als _a.wav"""
-        p = Path(wav_path)
-        backup_path = p.parent / (p.stem + "_a.wav")
-        try:
-            import shutil
-            shutil.copy2(wav_path, backup_path)
-            return True
-        except Exception as e:
-            print(f"      ⚠️ Backup fehlgeschlagen: {e}")
-            return False
-
     def generate_chunk_with_qc(self, tts, chunk_text, scene_id, chunk_id, part_idx=None):
-        base_temp = self.config.get("temperature", 0.70)
-        temp_schedule = self.config.get("qc_temperature_schedule", [base_temp, 0.55, 0.35])
-        cer_threshold = self.config.get("qc_cer_threshold", 0.08)
-
-        self.ensure_whisper_loaded()
-
-        ref_norm = self.normalize_text_for_eval(chunk_text)
-        last_cer = 1.0
-        attempts = 0
-
-        if self.whisper is None:
-            print("           ⚠️ QC deaktiviert (kein Whisper) – rendere ohne Prüfung")
-            path = self.generate_chunk_audio(tts, chunk_text, scene_id, chunk_id, base_temp, part_idx=part_idx)
-            if path:
-                self.remove_long_silences(path, max_silence_sec=self.config.get("max_silence_sec", 1.0))
-            return True, {"cer": None, "attempts": 1, "transcript": None}
-
-        for temp in temp_schedule:
-            attempts += 1
-            label = f"{chunk_id:03d}" if part_idx is None else f"{chunk_id:03d}_part_{part_idx:02d}"
-            print(f"           🔍 QC-Versuch {attempts} für Chunk {label} (Temp {temp:.2f})")
-        
-            path = self.generate_chunk_audio(tts, chunk_text, scene_id, chunk_id, temp, part_idx=part_idx)
-            if not path:
-                continue
-            
-            if attempts == 1:
-                self.backup_original(path)
-            
-            self.remove_long_silences(path, max_silence_sec=self.config.get("max_silence_sec", 1.0))
-            
-            transcript = self.transcribe_with_whisper(path)
-            hyp_norm = self.normalize_text_for_eval(transcript)
-            cer_value = self.compute_cer(ref_norm, hyp_norm)
-            last_cer = cer_value
-
-            print(f"               📊 CER={cer_value:.3f} (Schwelle {cer_threshold:.3f})")
-
-            if cer_value <= cer_threshold:
-                return True, {"cer": cer_value, "attempts": attempts, "transcript": transcript}
-
-        log_chunk_id = f"{chunk_id:03d}" if part_idx is None else f"{chunk_id:03d}_part_{part_idx:02d}"
-        print(f"           ⚠️ QC fehlgeschlagen nach {attempts} Versuchen (CER={last_cer:.3f})")
-        self.log_qc_problem(scene_id, log_chunk_id, last_cer, attempts)
-
-        return False, {"cer": last_cer, "attempts": attempts, "transcript": ""}
+        temperature = self.config.get("temperature", 0.60)
+        path = self.generate_chunk_audio(tts, chunk_text, scene_id, chunk_id, temperature, part_idx=part_idx)
+        if path:
+            self.remove_long_silences(path, max_silence_sec=self.config.get("max_silence_sec", 0.9))
+            return True, {"cer": None, "attempts": 1}
+        return False, {"cer": None, "attempts": 1}
 
     def merge_subchunks(self, scene_id, chunk_id):
         base_pattern = f"scene_{scene_id:04d}_chunk_{chunk_id:03d}_part_"
@@ -414,7 +300,7 @@ class SceneBasedAudiobookGenerator:
         from TTS.api import TTS
         import torch
 
-        print("\n🎧 SZENEN-BASIERTER HÖRBUCH-GENERATOR V4 - PRODUCTION")
+        print("\n🎧 SZENEN-BASIERTER HÖRBUCH-GENERATOR V6 - PRODUCTION")
         print("=" * 60)
 
         print(f"\n🔥 Hardware-Info:")
@@ -454,6 +340,21 @@ class SceneBasedAudiobookGenerator:
             print(f"   ✅ XTTS auf GPU {gpu_id}: {gpu_name} ({vram:.1f} GB VRAM)")
         else:
             print("   ✅ XTTS auf CPU")
+
+        # Latents einmal vorberechnen → kein Re-Encoding bei jedem Chunk
+        print("\n🔧 Berechne Speaker-Latents (einmalig)...")
+        try:
+            speaker_wav = self.config["speaker_wav"]
+            gpt_cond_latent, speaker_embedding = tts.synthesizer.tts_model.get_conditioning_latents(
+                audio_path=speaker_wav if isinstance(speaker_wav, list) else [speaker_wav]
+            )
+            self.gpt_cond_latent = gpt_cond_latent
+            self.speaker_embedding = speaker_embedding
+            print("   ✅ Latents gecacht - kein Re-Encoding pro Chunk mehr!")
+        except Exception as e:
+            print(f"   ⚠️ Latent-Cache fehlgeschlagen, nutze Fallback: {e}")
+            self.gpt_cond_latent = None
+            self.speaker_embedding = None
 
         print(f"\n📖 Lade Szenen aus: {self.config['scenes_file']}")
         with open(self.config["scenes_file"], 'r', encoding='utf-8') as f:
@@ -505,11 +406,16 @@ class SceneBasedAudiobookGenerator:
                 duration = time.time() - start
 
                 if success:
-                    cer_str = f"{qc_info['cer']:.3f}" if qc_info['cer'] else "n/a"
-                    print(f"           ✅ Fertig in {duration:.1f}s (CER={cer_str})")
+                    try:
+                        import soundfile as sf
+                        audio_dur = sf.info(str(base_file)).duration
+                        rtf = duration / audio_dur if audio_dur > 0 else 0
+                        print(f"           ✅ Fertig in {duration:.1f}s | Audio: {audio_dur:.1f}s | RTF: {rtf:.2f}")
+                    except Exception:
+                        print(f"           ✅ Fertig in {duration:.1f}s")
                     newly_generated += 1
                 else:
-                    print(f"           ⚠️ QC nicht bestanden (CER={qc_info['cer']:.3f})")
+                    print(f"           ⚠️ Generierung fehlgeschlagen")
                     
                     if base_file.exists():
                         base_file.unlink()
@@ -549,8 +455,6 @@ class SceneBasedAudiobookGenerator:
         print(f"   Übersprungen: {skipped_existing}")
         print(f"   Fehlerhafte: {failed_chunks}")
         print(f"\n📁 Ausgabe: {self.output_dir}")
-        if self.qc_problems_file.exists():
-            print(f"   🔎 QC-Probleme: {self.qc_problems_file}")
 
         return failed_chunks == 0
 
@@ -583,17 +487,10 @@ def main():
         "max_chunk_length": 240,
         "language": "de",
         "temperature": 0.60,
-      	"top_p": 0.93,
-      	"top_k": 35,
-     	"repetition_penalty": 1.45,
-
-        # QC (Whisper large-v3 für bessere Deutsch-Erkennung)
-        "whisper_model_name": "large-v3",
-        "whisper_device": "cpu",
-        "whisper_compute_type": "int8",
-        "qc_temperature_schedule": [0.70, 0.55, 0.35],
-        "qc_cer_threshold": 0.12,
-        "max_silence_sec": 0.9,
+        "top_p": 0.93,
+        "top_k": 35,
+        "repetition_penalty": 1.45,
+        "max_silence_sec": 1,
         "retry_chunk_length": 180,
         
         # GPU

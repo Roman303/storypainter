@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Hörbuch-Generator V7 - Production Ready
-- Multi-Sample Support (4-6 Samples für natürliche Stimme)
+Hörbuch-Generator V9 - Production Ready
+- Chunks kommen bereits fertig aufgeteilt aus dem scenes_file
+  (pro Szene: "chunks": [{"text": ..., "mood": ...}, ...])
+- Mood-basierte Referenzen: pro Chunk "mood" wählt die passende(n)
+  Referenzdatei(en), statt sie zu mitteln
+- Multi-File pro Mood: neutral.wav, neutral_2.wav, neutral_3.wav ... werden
+  automatisch erkannt und für diese Mood gemeinsam genutzt (gemittelt)
 - RTX 4070/4090 optimiert
 - 3 Quality Modes: --low 0/1/2
 - Zahlen-Normalisierung für weniger Artefakte
-- Latent-Cache: Speaker-Embeddings einmal vorberechnet → kein Re-Encoding pro Chunk
+- Latent-Cache: Speaker-Embeddings PRO MOOD einmal vorberechnet → kein Re-Encoding pro Chunk
 - Kein Whisper/QC - maximale Geschwindigkeit
 - RTF-Anzeige pro Chunk
-- \n\n Absatz-Splitting
-- Low Mode 2: chunk_split statt max_chunk_length ändern
+- Low Mode 2: chunk_split statt max_chunk_length ändern (splittet vorhandene Chunks weiter)
 """
 
 import os
@@ -31,6 +35,26 @@ class SceneBasedAudiobookGenerator:
         self.output_dir = Path(config["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.progress_file = self.output_dir / "progress.json"
+
+    @staticmethod
+    def discover_mood_files(voice_dir, mood):
+        """
+        Findet alle Referenzdateien für eine Mood in voice_dir:
+        neutral.wav, neutral_2.wav, neutral_3.wav, ... (Groß/Kleinschreibung egal).
+        Sortiert: Datei ohne Suffix zuerst, danach numerisch aufsteigend.
+        """
+        voice_dir = Path(voice_dir)
+        pattern = re.compile(rf'^{re.escape(mood)}(?:_(\d+))?\.wav$', re.IGNORECASE)
+        matches = []
+        if voice_dir.exists():
+            for f in os.listdir(voice_dir):
+                m = pattern.match(f)
+                if m:
+                    suffix = int(m.group(1)) if m.group(1) else 0
+                    matches.append((suffix, f))
+        matches.sort()
+        return [str(voice_dir / f) for _, f in matches]
+
         
     def load_progress(self):
         if self.progress_file.exists():
@@ -58,43 +82,6 @@ class SceneBasedAudiobookGenerator:
         with open(self.progress_file, 'w') as f:
             json.dump(progress, f, indent=2)
 
-    def split_scene_into_chunks(self, scene_text, max_chunk_length=350):
-        # ERST bei \n\n splitten (Absätze) → jeder Absatz wird eigener Chunk-Block
-        paragraphs = re.split(r'\n\n+', scene_text)
-        all_chunks = []
-
-        for paragraph in paragraphs:
-            text = paragraph.replace('_', ' ')
-            text = re.sub(r'[ \t]+', ' ', text).strip()
-            if not text:
-                continue
-
-            sentences = re.split(r'(?<=[.!?…])\s+', text)
-            current_chunk = ""
-
-            for s in sentences:
-                s = s.strip()
-                if not s:
-                    continue
-                s = s.replace('\u00A0', ' ').replace('\u202f', ' ').strip()
-
-                if len(s) > max_chunk_length:
-                    parts = re.split(r'(?<=[,;:—–])\s+', s)
-                else:
-                    parts = [s]
-
-                for part in parts:
-                    if len(current_chunk) + len(part) > max_chunk_length and current_chunk:
-                        all_chunks.append(current_chunk.strip())
-                        current_chunk = part + " "
-                    else:
-                        current_chunk += part + " "
-
-            if current_chunk.strip():
-                all_chunks.append(current_chunk.strip())
-
-        return all_chunks
-    
     def split_problematic_chunk(self, text, max_len=None):
         if max_len is None:
             max_len = self.config.get("retry_chunk_length", 180)
@@ -311,7 +298,21 @@ class SceneBasedAudiobookGenerator:
         new_audio.export(wav_path, format="wav")
         return True
     
-    def generate_chunk_audio(self, tts, chunk_text, scene_id, chunk_id, temperature, part_idx=None):
+    def resolve_mood(self, mood):
+        """Fällt auf default_mood zurück, falls die Mood nicht gecacht/konfiguriert ist."""
+        default_mood = self.config.get("default_mood", "neutral")
+        if mood not in self.latents_cache:
+            if mood is not None and mood != default_mood:
+                print(f"    ⚠️ Unbekannte Mood '{mood}' - falle zurück auf '{default_mood}'")
+            mood = default_mood
+        if mood not in self.latents_cache:
+            # Absoluter Fallback: irgendeine gecachte Mood nehmen
+            mood = next(iter(self.latents_cache))
+        return mood
+
+    def generate_chunk_audio(self, tts, chunk_text, scene_id, chunk_id, temperature, mood=None, part_idx=None):
+        import soundfile as sf
+
         text = self.prepare_text_for_xtts(chunk_text)
 
         base_name = f"scene_{scene_id:04d}_chunk_{chunk_id:03d}"
@@ -320,26 +321,32 @@ class SceneBasedAudiobookGenerator:
 
         output_file = self.output_dir / f"{base_name}.wav"
 
+        mood = self.resolve_mood(mood)
+        gpt_cond_latent, speaker_embedding = self.latents_cache[mood]
+
         try:
-            tts.tts_to_file(
+            xtts_model = tts.synthesizer.tts_model
+            out = xtts_model.inference(
                 text=text,
-                speaker_wav=self.config["speaker_wav"],
                 language=self.config["language"],
-                file_path=str(output_file),
+                gpt_cond_latent=gpt_cond_latent,
+                speaker_embedding=speaker_embedding,
                 temperature=temperature,
                 repetition_penalty=self.config.get("repetition_penalty", 1.45),
                 top_p=self.config.get("top_p", 0.93),
                 top_k=self.config.get("top_k", 35),
                 speed=self.config.get("speed", 1.0),
+                enable_text_splitting=False,
             )
+            sf.write(str(output_file), out["wav"], self.config.get("output_sample_rate", 24000))
             return str(output_file)
         except Exception as e:
             print(f"    ⚠️ Fehler bei TTS: {e}")
             return None
 
-    def generate_chunk_with_qc(self, tts, chunk_text, scene_id, chunk_id, part_idx=None):
+    def generate_chunk_with_qc(self, tts, chunk_text, scene_id, chunk_id, mood=None, part_idx=None):
         temperature = self.config.get("temperature", 0.60)
-        path = self.generate_chunk_audio(tts, chunk_text, scene_id, chunk_id, temperature, part_idx=part_idx)
+        path = self.generate_chunk_audio(tts, chunk_text, scene_id, chunk_id, temperature, mood=mood, part_idx=part_idx)
         if path:
             self.remove_long_silences(path, max_silence_sec=self.config.get("max_silence_sec", 1.0))
             return True, {"cer": None, "attempts": 1}
@@ -383,7 +390,6 @@ class SceneBasedAudiobookGenerator:
             print(f"   Top-P: {self.config['top_p']}")
             print(f"   Top-K: {self.config['top_k']}")
             print(f"   Repetition Penalty: {self.config['repetition_penalty']}")
-            print(f"   Max Chunk Length: {self.config['max_chunk_length']}")
             print(f"   Speed: {self.config.get('speed', 1.0)}")
 
         print(f"\n🔥 Hardware-Info:")
@@ -424,6 +430,24 @@ class SceneBasedAudiobookGenerator:
         else:
             print("   ✅ XTTS auf CPU")
 
+        print(f"\n🎭 Berechne Speaker-Latents pro Mood (einmalig, gecacht)...")
+        xtts_model = tts.synthesizer.tts_model
+        voice_dir = self.config["voice_dir"]
+        self.latents_cache = {}
+        for mood in self.config["moods"]:
+            refs = self.discover_mood_files(voice_dir, mood)
+            if not refs:
+                print(f"   ⚠️ {mood}: keine Dateien gefunden, überspringe")
+                continue
+            print(f"   ⏳ {mood}: {[Path(r).name for r in refs]}")
+            gpt_cond_latent, speaker_embedding = xtts_model.get_conditioning_latents(audio_path=refs)
+            self.latents_cache[mood] = (gpt_cond_latent, speaker_embedding)
+
+        if not self.latents_cache:
+            print("   ❌ Keine einzige Mood konnte geladen werden - Abbruch")
+            return False
+        print(f"   ✅ {len(self.latents_cache)} Moods gecacht: {list(self.latents_cache.keys())}")
+
         print(f"\n📖 Lade Szenen aus: {self.config['scenes_file']}")
         with open(self.config["scenes_file"], 'r', encoding='utf-8') as f:
             metadata = json.load(f)
@@ -441,25 +465,26 @@ class SceneBasedAudiobookGenerator:
 
         for scene_idx, scene in enumerate(scenes, 1):
             scene_id = scene_idx
-            scene_text = scene.get("text", "")
+            chunks = scene.get("chunks", [])
 
-            if not scene_text:
-                print(f"\n[Szene {scene_id:04d}] ⚠️ Kein Text, überspringe...")
+            if not chunks:
+                print(f"\n[Szene {scene_id:04d}] ⚠️ Keine Chunks, überspringe...")
                 continue
 
             print(f"\n{'─' * 60}")
             print(f"[Szene {scene_id:04d}/{len(scenes)}]")
-            print(f"   Text-Länge: {len(scene_text)} Zeichen")
+            print(f"   📝 {len(chunks)} Chunks (aus JSON)")
 
-            chunks = self.split_scene_into_chunks(
-                scene_text,
-                self.config.get("max_chunk_length", 250)
-            )
-            print(f"   📝 {len(chunks)} Chunks erstellt (max {self.config['max_chunk_length']} Zeichen)")
+            for chunk_idx, chunk in enumerate(chunks, 1):
+                chunk_text = chunk.get("text", "") if isinstance(chunk, dict) else chunk
+                chunk_mood = chunk.get("mood", self.config.get("default_mood", "neutral")) if isinstance(chunk, dict) else self.config.get("default_mood", "neutral")
 
-            for chunk_idx, chunk_text in enumerate(chunks, 1):
                 total_chunks += 1
                 base_file = self.output_dir / f"scene_{scene_id:04d}_chunk_{chunk_idx:03d}.wav"
+
+                if not chunk_text.strip():
+                    print(f"   [{chunk_idx:03d}] ⚠️ Leerer Chunk-Text, überspringe")
+                    continue
 
                 if base_file.exists():
                     print(f"   [{chunk_idx:03d}] ⭐️ {base_file.name} existiert")
@@ -488,7 +513,7 @@ class SceneBasedAudiobookGenerator:
                         sub_chunks.append(remaining)
                     sub_chunks = [s for s in sub_chunks if s]
 
-                    print(f"   [{chunk_idx:03d}] ✂️ LOW MODE 2: {len(sub_chunks)} Parts (je ~{part_len} Zeichen)")
+                    print(f"   [{chunk_idx:03d}] ✂️ LOW MODE 2 | Mood: {chunk_mood} | {len(sub_chunks)} Parts (je ~{part_len} Zeichen)")
 
                     sub_failed = False
                     for sub_i, sub_text in enumerate(sub_chunks, 1):
@@ -497,7 +522,7 @@ class SceneBasedAudiobookGenerator:
 
                         start = time.time()
                         success, _ = self.generate_chunk_with_qc(
-                            tts, sub_text, scene_id, chunk_idx, part_idx=sub_i
+                            tts, sub_text, scene_id, chunk_idx, mood=chunk_mood, part_idx=sub_i
                         )
                         duration = time.time() - start
 
@@ -518,10 +543,10 @@ class SceneBasedAudiobookGenerator:
                 else:
                     # === NORMAL MODE / LOW MODE 1: Direkt generieren ===
                     preview = chunk_text[:60] + ("..." if len(chunk_text) > 60 else "")
-                    print(f"   [{chunk_idx:03d}] 🎤 {preview}")
+                    print(f"   [{chunk_idx:03d}] 🎤 Mood: {chunk_mood} | {preview}")
 
                     start = time.time()
-                    success, _ = self.generate_chunk_with_qc(tts, chunk_text, scene_id, chunk_idx)
+                    success, _ = self.generate_chunk_with_qc(tts, chunk_text, scene_id, chunk_idx, mood=chunk_mood)
                     duration = time.time() - start
 
                     if success:
@@ -548,7 +573,7 @@ class SceneBasedAudiobookGenerator:
                             print(f"           ✂️ Neu aufgeteilt in {len(subchunks)} Subchunks")
                             for sub_i, sub_text in enumerate(subchunks, 1):
                                 sub_success, _ = self.generate_chunk_with_qc(
-                                    tts, sub_text, scene_id, chunk_idx, part_idx=sub_i
+                                    tts, sub_text, scene_id, chunk_idx, mood=chunk_mood, part_idx=sub_i
                                 )
                                 if sub_success:
                                     print(f"               ✅ Sub-Chunk {sub_i} OK")
@@ -594,20 +619,22 @@ def main():
         "model_path": "/workspace/storypainter/voices/tomhq",
         "config_path": "/workspace/storypainter/voices/tomhq/config.json",
         
-        # Multi-Sample Reference (4 Samples für natürliche Stimme)
-        "speaker_wav": [
-            "/workspace/storypainter/voices/tomhq/neutral.wav",
-            "/workspace/storypainter/voices/tomhq/question.wav",
-            "/workspace/storypainter/voices/tomhq/excited.wav",
-            "/workspace/storypainter/voices/tomhq/sad.wav"
-        ],
+        # Voice-Verzeichnis + Liste der zu nutzenden Moods.
+        # Referenzdateien werden automatisch erkannt: neutral.wav, neutral_2.wav,
+        # neutral_3.wav, ... (alle Dateien einer Mood werden zusammen gemittelt,
+        # NICHT über Moods hinweg gemischt).
+        # Jeder Chunk im scenes_file kann optional "mood": "sad" (o.ä.) setzen;
+        # fehlt das Feld, wird "default_mood" verwendet.
+        "voice_dir": "/workspace/storypainter/voices/tomhq/ref",
+        "moods": ["neutral", "calm", "excited", "angry", "determined", "happy", "assertive", "curios", "reserved", "sad", "sarcastic", "surprised"],
+        "default_mood": "neutral",
+        "output_sample_rate": 24000,
         
         # Dateien
         "scenes_file": os.path.join(base_path, "book_scenes.json"),
         "output_dir": os.path.join(base_path, "tts"),
     
         # TTS-Einstellungen (Original)
-        "max_chunk_length": 240,
         "language": "de",
         "temperature": 0.60,
         "top_p": 0.93,
@@ -661,31 +688,32 @@ def main():
             print(f"   Bitte korrigiere den Pfad in CONFIG['{path_key}']")
             sys.exit(1)
     
-    # Speaker WAV(s) validieren
-    speaker_wavs = CONFIG["speaker_wav"]
-    if isinstance(speaker_wavs, str):
-        speaker_wavs = [speaker_wavs]
-    
-    print(f"\n🎤 Validiere Speaker-Samples ({len(speaker_wavs)} Dateien)...")
-    missing_samples = []
-    for wav in speaker_wavs:
-        exists = os.path.exists(wav)
-        status = "✅" if exists else "❌"
-        wav_name = os.path.basename(wav)
-        print(f"   {status} {wav_name}")
-        if not exists:
-            missing_samples.append(wav)
-    
-    if missing_samples:
-        print(f"\n⚠️ Fehlende Speaker-Samples:")
-        for wav in missing_samples:
-            print(f"   - {wav}")
-        print("\n💡 OPTIONEN:")
-        print("   A) Erstelle die 4 Samples (neutral/question/excited/sad)")
-        print("   B) Nutze vorübergehend nur 1 Sample:")
-        print("      Ändere CONFIG['speaker_wav'] zu:")
-        print('      "speaker_wav": "/workspace/storypainter/voices/tomhq/neutral.wav"')
+    # Speaker-Referenzen pro Mood validieren (Auto-Discovery aus voice_dir)
+    voice_dir = CONFIG["voice_dir"]
+    print(f"\n🎤 Prüfe Voice-Verzeichnis: {voice_dir}")
+    if not os.path.isdir(voice_dir):
+        print(f"❌ voice_dir existiert nicht: {voice_dir}")
         sys.exit(1)
+
+    print(f"\n🎭 Scanne Referenzdateien pro Mood ({CONFIG['moods']})...")
+    missing_moods = []
+    for mood in CONFIG["moods"]:
+        refs = SceneBasedAudiobookGenerator.discover_mood_files(voice_dir, mood)
+        if refs:
+            names = [os.path.basename(r) for r in refs]
+            print(f"   ✅ {mood}: {names}")
+        else:
+            print(f"   ❌ {mood}: keine Dateien gefunden (erwartet z.B. {mood}.wav, {mood}_2.wav, ...)")
+            missing_moods.append(mood)
+
+    default_mood = CONFIG.get("default_mood")
+    if default_mood in missing_moods or default_mood not in CONFIG["moods"]:
+        print(f"\n❌ default_mood '{default_mood}' hat keine gefundenen Referenzdateien - kann nicht als Fallback dienen.")
+        sys.exit(1)
+
+    if missing_moods:
+        print(f"\n⚠️ Für {missing_moods} wurden keine Dateien gefunden.")
+        print(f"   Chunks mit dieser Mood fallen zur Laufzeit automatisch auf '{default_mood}' zurück.")
     
     print("\n✅ Alle Pfade OK\n")
     
