@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Kombiniert Chunk-WAVs zu Szenen-WAVs
-- Liest scene_XXXX_chunk_YYY.wav
+- Liest scene_XXXX_chunk_YYY.wav und scene_XXXX_chunk_YYY_Zusatz.wav
 - Kombiniert zu scene_XXXX.wav
 - Fügt natürliche Pausen zwischen Chunks ein
 """
@@ -21,8 +21,9 @@ class SceneWavCombiner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
     def find_chunk_files(self):
-        """Findet alle Chunk-Dateien und gruppiert nach Szene"""
-        pattern = re.compile(r'scene_(\d{4})_chunk_(\d{3})\.wav')
+        """Findet alle Chunk-Dateien (auch mit Namenszusätzen) und gruppiert nach Szene"""
+        # Erlaubt optionale Zeichen (.*) vor der Endung .wav
+        pattern = re.compile(r'scene_(\d{4})_chunk_(\d{3}).*\.wav')
         scenes = defaultdict(list)
         
         for wav_file in sorted(self.input_dir.glob("scene_*.wav")):
@@ -64,7 +65,7 @@ class SceneWavCombiner:
                 if i < len(chunks):
                     combined += pause
                 
-                print(f"   ✓ Chunk {chunk_id:03d} ({len(audio)/1000:.1f}s)")
+                print(f"   ✓ Chunk {chunk_id:03d} ({len(audio)/1000:.1f}s) - {chunk_file.name}")
                 
             except Exception as e:
                 print(f"   ❌ Fehler bei Chunk {chunk_id:03d}: {e}")
@@ -93,7 +94,7 @@ class SceneWavCombiner:
         
         if not scenes:
             print("❌ Keine Chunk-Dateien gefunden!")
-            print(f"   Erwartet: scene_XXXX_chunk_YYY.wav in {self.input_dir}")
+            print(f"   Erwartet: scene_XXXX_chunk_YYY.wav oder scene_XXXX_chunk_YYY_Zusatz.wav in {self.input_dir}")
             return []
         
         print(f"✅ {len(scenes)} Szenen mit Chunks gefunden\n")

@@ -185,7 +185,7 @@ class VoiceGenerator:
 
         numbered = []
 
-        for wav in self.voice_dir.glob("*.wav"):
+        for wav in Path(self.config["ref_dir"]).glob("*.wav"):
 
             match = pattern.match(
                 wav.name
@@ -1264,7 +1264,7 @@ def main():
         # -----------------------------------------------------
 
         "model_path": str(
-            voice_dir / "model.pth"
+            voice_dir
         ),
 
         "config_path": str(
@@ -1337,6 +1337,9 @@ def main():
         "voice_dir":
             config["voice_dir"],
 
+        "ref_dir":
+            config["ref_dir"],
+
         "model_path":
             config["model_path"],
 
@@ -1377,7 +1380,7 @@ def main():
     # ---------------------------------------------------------
 
     wavs = sorted(
-        voice_dir.glob(
+        ref_dir.glob(
             "*.wav"
         )
     )
@@ -1386,14 +1389,14 @@ def main():
 
         print(
             "\n❌ Keine WAV-Dateien "
-            "im Voice-Verzeichnis."
+            "im Referenz-Verzeichnis."
         )
 
         sys.exit(1)
 
     print(
         f"\n🎙️ {len(wavs)} "
-        f"WAV-Dateien gefunden"
+        f"Referenz-WAV-Dateien in {ref_dir} gefunden"
     )
 
     for wav in wavs:
