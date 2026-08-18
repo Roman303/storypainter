@@ -60,6 +60,13 @@ from pydub import AudioSegment
 from pydub.silence import split_on_silence
 
 
+XTTS_INTERNAL_VOICES = {
+    "clarissa", "michael", "baldur", "ana maria", "kristin", "asher",
+    "aria", "charlotte", "edinho", "garrick", "helena", "johanna",
+    "lula", "mair", "otton", "samuel", "suzan"
+}
+
+
 class VoiceGenerator:
     def __init__(self, config):
         self.config = config
@@ -676,10 +683,14 @@ class VoiceGenerator:
 
             return True
 
-        speaker = item.get(
-            "speaker",
-            self.current_speaker
-        )
+        # -----------------------------------------------------
+        # Sprecher bestimmen:
+        # interne XTTS-Stimme ODER eigene Mood-Referenzen
+        # -----------------------------------------------------
+
+        name = item.get("name")
+        json_speaker = item.get("speaker")
+        candidate = name if name is not None else json_speaker
 
         mood = item.get(
             "mood",
@@ -689,31 +700,23 @@ class VoiceGenerator:
             )
         )
 
-        # -----------------------------------------------------
-        # Prüfen: richtiger Sprecher
-        # -----------------------------------------------------
-
-        if speaker != self.current_speaker:
-
-            print(
-                f"   ⚠️ Sprecher '{speaker}' "
-                f"übersprungen."
-            )
-
-            print(
-                f"      Aktueller Testsprecher: "
-                f"{self.current_speaker}"
-            )
-
-            return True
+        if (
+            candidate is not None
+            and str(candidate).strip().lower() in XTTS_INTERNAL_VOICES
+        ):
+            # Original-Case aus dem JSON beibehalten.
+            speaker = str(candidate).strip()
+            speaker_wav = None
+        else:
+            speaker = None
+            speaker_wav = self.get_mood_references(mood)
 
         # -----------------------------------------------------
-        # Referenzen
+        # Nur bei eigener Referenzstimme den alten Single-Speaker-
+        # Testlauf erzwingen. Interne XTTS-Stimmen dürfen passieren.
         # -----------------------------------------------------
 
-        references = self.get_mood_references(
-            mood
-        )
+        references = speaker_wav
 
         output_name = (
             self.make_output_filename(
@@ -759,7 +762,7 @@ class VoiceGenerator:
 
         print()
         print(
-            f"   🎤 {speaker}"
+            f"   🎤 {speaker if speaker is not None else self.current_speaker}"
             f" | 🎭 {mood}"
         )
 
@@ -767,16 +770,19 @@ class VoiceGenerator:
             f"   📝 {preview}"
         )
 
-        print(
-            f"   🎙️ Referenzen "
-            f"({len(references)}):"
-        )
-
-        for ref in references:
+        if speaker_wav is None:
+            print("   🎙️ Interne XTTS-Stimme (keine speaker_wav-Referenz)")
+        else:
             print(
-                f"      - "
-                f"{os.path.basename(ref)}"
+                f"   🎙️ Referenzen "
+                f"({len(speaker_wav)}):"
             )
+
+            for ref in speaker_wav:
+                print(
+                    f"      - "
+                    f"{os.path.basename(ref)}"
+                )
 
         # -----------------------------------------------------
         # Text vorbereiten
@@ -800,8 +806,9 @@ class VoiceGenerator:
 
                 text=prepared_text,
 
-                # EIN oder MEHRERE Mood-Samples
-                speaker_wav=references,
+                # Entweder interne XTTS-Stimme oder eigene Referenz-WAVs.
+                speaker=speaker,
+                speaker_wav=speaker_wav,
 
                 language=self.config[
                     "language"
@@ -937,12 +944,20 @@ class VoiceGenerator:
                     )
                     continue
 
-                items.append({
+                item = {
                     "scene": scene_index,
                     "chunk": chunk_index,
                     "mood": mood,
                     "text": text
-                })
+                }
+
+                # Optional: interne XTTS-Stimme aus dem JSON übernehmen.
+                if "name" in chunk:
+                    item["name"] = chunk["name"]
+                if "speaker" in chunk:
+                    item["speaker"] = chunk["speaker"]
+
+                items.append(item)
 
         return items
 
@@ -1131,26 +1146,8 @@ class VoiceGenerator:
             1
         ):
 
-            speaker = item.get(
-                "speaker",
-                self.current_speaker
-            )
-
-            # In diesem Testlauf
-            # nur EIN Sprecher
-            if speaker != self.current_speaker:
-
-                skipped_count += 1
-
-                print(
-                    f"\n[{index:04d}] "
-                    f"⏭️ {speaker} "
-                    f"→ anderer Sprecher, "
-                    f"übersprungen"
-                )
-
-                continue
-
+            # generate_one entscheidet selbst, ob eine interne XTTS-Stimme
+            # oder die konfigurierten Mood-Referenz-WAVs verwendet werden.
             ok = self.generate_one(
                 tts,
                 item,
